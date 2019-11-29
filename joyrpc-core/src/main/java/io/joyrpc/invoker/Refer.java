@@ -426,7 +426,11 @@ public class Refer<T> extends AbstractInvoker<T> {
         //注册
         if (url.getBoolean(Constants.REGISTER_OPTION) == true) {
             //URL里面注册的类是实际的interfaceClass，不是proxyClass
-            registry.register(url);
+            registry.register(url).whenComplete((v,t)->{
+                if(t != null){
+                    logger.error(String.format("register consumer %s", t.getMessage()), t);
+                }
+            });
         }
         cluster.open(o -> {
             if (o.isSuccess()) {
