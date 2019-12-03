@@ -115,6 +115,8 @@ public class Cluster {
     protected LinkedList<Node> reconnects;
     //断开连接的节点
     protected Queue<Node> disconnects = new ConcurrentLinkedQueue<>();
+    //需关闭节点
+    protected Queue<Node> closeNodes = new ConcurrentLinkedQueue<>();
     //重连节点队列第一条的重试信息
     protected Node.Retry retry;
     //集群监听器
@@ -364,6 +366,9 @@ public class Cluster {
             if (dashboard != null && dashboard.isExpired()) {
                 runnables.add(dashboard::snapshot);
             }
+            if (!closeNodes.isEmpty()) {
+                runnables.add(this::closeNodes);
+            }
             //遍历所有就绪节点，判断是否有任务触发
             for (Node node : readys) {
                 node.supervise(runnables);
@@ -401,6 +406,7 @@ public class Cluster {
         Node now = nodes.get(node.getName());
         return now != null && now == node;
     }
+
 
     /**
      * 重新选举节点
@@ -499,7 +505,7 @@ public class Cluster {
      */
     protected void discard(final Node node) {
         //关闭节点
-        node.close();
+        closeNode(node);
         //删除连接节点
         connects.remove(node.getName(), node);
     }
@@ -511,7 +517,7 @@ public class Cluster {
      */
     protected void backup(final Node node) {
         //关闭节点
-        node.close();
+        closeNode(node);
         //删除连接节点
         connects.remove(node.getName(), node);
         //备份节点
@@ -529,6 +535,12 @@ public class Cluster {
         //连接中状态
         if (node.getState().connecting(node::setState)) {
             node.open(n -> switcher.writer().run(() -> onConnect(n)));
+        }
+    }
+
+    protected void closeNode(final Node node) {
+        if (!closeNodes.offer(node)) {
+            node.close();
         }
     }
 
@@ -599,6 +611,20 @@ public class Cluster {
             reconnecting.set(false);
         }
 
+    }
+
+    /**
+     * 检查节点关闭队列，逐一关闭node节点
+     */
+    protected void closeNodes() {
+        while (true) {
+            Node node = closeNodes.poll();
+            if (node != null) {
+                node.close();
+            } else {
+                break;
+            }
+        }
     }
 
     /**
@@ -818,7 +844,7 @@ public class Cluster {
         if (node != null) {
             logger.info(String.format("delete shard %s when cluster event", shard.getName()));
             //由于注册中心的事件晚于服务端直接发送的下线命令，所以这里可以做到优雅关闭节点
-            node.close(null);
+            closeNode(node);
             if (connects.remove(name) != null) {
                 //重新设置readys节点
                 readys = new ArrayList<>(connects.values());
