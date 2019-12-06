@@ -1,6 +1,6 @@
 # 版本说明
 
-## 1.0.4-SNAPSHOT
+## 1.0.4-RELEASE(2019-12-06)
 
 ### New Features  
 
