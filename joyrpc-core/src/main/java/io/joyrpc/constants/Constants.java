@@ -20,17 +20,18 @@ package io.joyrpc.constants;
  * #L%
  */
 
-import io.joyrpc.context.GlobalContext;
 import io.joyrpc.context.OsType;
 import io.joyrpc.event.PublisherConfig;
 import io.joyrpc.extension.URL;
 import io.joyrpc.extension.URLBiOption;
 import io.joyrpc.extension.URLOption;
+import io.joyrpc.util.GrpcType;
 
+import java.lang.reflect.Method;
 import java.util.function.BiFunction;
 
 import static io.joyrpc.Plugin.ENVIRONMENT;
-import static io.joyrpc.context.Environment.OS_TYPE;
+import static io.joyrpc.Plugin.GRPC_FACTORY;
 
 /**
  * 常量定义
@@ -238,7 +239,10 @@ public class Constants {
      * 自定义设置：callback的线程池队列
      */
     public static final String SETTING_CALLBACK_POOL_QUEUE = "callback.pool.queue";
-
+    /**
+     * 序列化黑白名单
+     */
+    public static final String SETTING_SERIALIZATION_BLACKLIST = "serialization.blacklist";
     /**
      * properties 文件里默认注册中心key
      */
@@ -260,20 +264,52 @@ public class Constants {
 
     public static final String PROTOCOL_VERSION_KEY = "protocol.version";
 
+    public final static String KEY_CPU_CORES = "host.cpucores";
+    public final static String KEY_MEMORY = "host.memory";
+    public final static String KEY_DISK_SIZE = "host.disksize";
+    public final static String KEY_CLIENT_VERSION = "client.version";
+    public final static String KEY_USER_HOME = "user.home";
+    public final static String KEY_OS_NAME = "os.name";
+    public final static String KEY_OS_TYPE = "os.type";
+    public final static String KEY_START_TIME = "start.time";
+    public final static String KEY_JAVA_VERSION = "java.version";
+    public final static String KEY_SERVICE_MESH = "service_mesh";
+    public final static String KEY_NODE_IP = "NODE.IP";
+    @Deprecated
+    public final static String APPLICATION_NAME = "application.name";
+    @Deprecated
+    public final static String APPLICATION_ID = "application.id";
+    @Deprecated
+    public final static String APPLICATION_GROUP = "application.group";
+    @Deprecated
+    public final static String APPLICATION_INSTANCE = "application.instance";
+
+
+    public static final String KEY_PID = "pid";
+
+    /**
+     * 系统名称
+     */
+    public final static String KEY_SYSTEM_NAME = "systemName";
+
     /**
      * 当前所在文件夹地址
      */
     public final static String KEY_APPAPTH = "appPath";
     /**
-     * 自动部署的appId
+     * 应用ID
      */
     public final static String KEY_APPID = "appId";
     /**
-     * 自动部署的appName
+     * 应用名称
      */
     public final static String KEY_APPNAME = "appName";
     /**
-     * 自动部署的appInsId
+     * 应用分组
+     */
+    public final static String KEY_APPGROUP = "appGroup";
+    /**
+     * 应用实例ID
      */
     public final static String KEY_APPINSID = "appInsId";
     /**
@@ -287,17 +323,17 @@ public class Constants {
      */
     public static final char INTERNAL_KEY_PREFIX = '_';
     /**
-     * 内部使用的key：自动部署appId
+     * 内部使用的key：appId
      */
     @Deprecated
     public static final String INTERNAL_KEY_APPID = INTERNAL_KEY_PREFIX + KEY_APPID;
     /**
-     * 内部使用的key：自动部署appName
+     * 内部使用的key：appName
      */
     @Deprecated
     public static final String INTERNAL_KEY_APPNAME = INTERNAL_KEY_PREFIX + KEY_APPNAME;
     /**
-     * 内部使用的key：自动部署实例Id
+     * 内部使用的key：实例Id
      */
     @Deprecated
     public static final String INTERNAL_KEY_APPINSID = INTERNAL_KEY_PREFIX + KEY_APPINSID;
@@ -330,15 +366,15 @@ public class Constants {
      */
     public static final String HIDDEN_KEY_DESTROY = HIDE_KEY_PREFIX + "destroy";
     /**
-     * 隐藏属性的key：自动部署appId
+     * 隐藏属性的key：appId
      */
     public static final String HIDDEN_KEY_APPID = HIDE_KEY_PREFIX + "appId";
     /**
-     * 隐藏属性的key：自动部署appName
+     * 隐藏属性的key：appName
      */
     public static final String HIDDEN_KEY_APPNAME = HIDE_KEY_PREFIX + "appName";
     /**
-     * 隐藏属性的key：自动部署实例Id
+     * 隐藏属性的key：实例Id
      */
     public static final String HIDDEN_KEY_APPINSID = HIDE_KEY_PREFIX + "appInsId";
     /**
@@ -387,10 +423,10 @@ public class Constants {
     public static final PublisherConfig EVENT_PUBLISHER_TRANSPORT_CONF = PublisherConfig.builder().timeout(1000).build();
 
 
-
-    /*======================= URL prarmters type =======================*/
-
-    public static final BiFunction<String, String, String> METHOD_KEY = (method, key) -> new StringBuilder(60).append(URL_METHOD_PREX).append(method).append(".").append(key).toString();
+    /**
+     * 方法参数函数
+     */
+    public static final BiFunction<String, String, String> METHOD_KEY_FUNC = (method, key) -> key == null ? null : new StringBuilder(60).append(URL_METHOD_PREX).append(method).append(".").append(key).toString();
 
     /*------------------------ 通用配置 ------------------------*/
     public static final URLOption<String> FILTER_OPTION = new URLOption<>("filter", "");
@@ -420,23 +456,35 @@ public class Constants {
     /**
      * 默认分发算法
      */
-    public static final String DEFAULT_ROUTE = "failover";
+    public static final String DEFAULT_ROUTER = "failover";
     /**
      * 分发选项
      */
-    public static final URLOption<String> ROUTE_OPTION = new URLOption<>("route", "failover");
+    public static final URLOption<String> ROUTER_OPTION = new URLOption<>("router", DEFAULT_ROUTER);
+    public static final URLOption<String> NODE_SELECTOR_OPTION = new URLOption<>("nodeSelector", (String) null);
     public static final URLOption<String> FAILOVER_WHEN_THROWABLE_OPTION = new URLOption<>("failoverWhenThrowable", "");
     public static final URLOption<String> FAILOVER_PREDICATION_OPTION = new URLOption<>("failoverPredication", "");
     public static final URLOption<Boolean> FROM_GROUP_OPTION = new URLOption<>("_fromGroup", false);
     /**
      * 默认连接工厂
      */
-    public static final String DEFAULT_HANNEL_FACTORY = "shared";
+    public static final String DEFAULT_CHANNEL_FACTORY = "shared";
     /**
      * 连接工厂选项
      */
-    public static final URLOption<String> CHANNEL_FACTORY_OPTION = new URLOption<>("channelFactory", "shared");
+    public static final URLOption<String> CHANNEL_FACTORY_OPTION = new URLOption<>("channelFactory", DEFAULT_CHANNEL_FACTORY);
+    /**
+     * 身份认证
+     */
     public static final URLOption<String> AUTHENTICATION_OPTION = new URLOption<>("authentication", "");
+    /**
+     * 权限认证
+     */
+    public static final URLOption<String> AUTHORIZATION_OPTION = new URLOption<>("authorization", "");
+    /**
+     * 身份配置
+     */
+    public static final URLOption<String> IDENTIFICATION_OPTION = new URLOption<>("identification", "");
 
     /**
      * 优雅下线
@@ -454,15 +502,21 @@ public class Constants {
     /**
      * 失败重试次数
      */
-    public static final URLOption<Integer> RETRIES_OPTION = new URLOption<>("retries", 0);
+    public static final URLOption<Integer> RETRIES_OPTION = new URLOption<>("retries", 1);
     /**
      * 每个节点只重试一次
      */
     public static final URLOption<Boolean> RETRY_ONLY_ONCE_PER_NODE_OPTION = new URLOption<>("retryOnlyOncePerNode", false);
+
+    /**
+     * 默认重试目标节点选择器
+     */
+    public static final String DEFAULT_FAILOVER_SELECTOR = "simple";
+
     /**
      * 重试目标节点选择器
      */
-    public static final URLOption<String> FAILOVER_SELECTOR_OPTION = new URLOption<>("failoverSelector", "simple");
+    public static final URLOption<String> FAILOVER_SELECTOR_OPTION = new URLOption<>("failoverSelector", DEFAULT_FAILOVER_SELECTOR);
     /**
      * 默认负载均衡算法
      */
@@ -470,7 +524,7 @@ public class Constants {
     /**
      * 负载均衡选项
      */
-    public static final URLOption<String> LOADBALANCE_OPTION = new URLOption<>("loadbalance", "randomWeight");
+    public static final URLOption<String> LOADBALANCE_OPTION = new URLOption<>("loadbalance", DEFAULT_LOADBALANCE);
     public static final URLOption<Boolean> STICKY_OPTION = new URLOption<>("sticky", false);
     public static final URLOption<Boolean> IN_JVM_OPTION = new URLOption<>("injvm", true);
     public static final URLOption<Boolean> CHECK_OPTION = new URLOption<>("check", true);
@@ -491,7 +545,6 @@ public class Constants {
      */
     public static final URLOption<String> PROXY_OPTION = new URLOption<>("proxy", DEFAULT_PROXY);
     public static final URLOption<Boolean> VALIDATION_OPTION = new URLOption<>("validation", false);
-    public static final URLOption<String> ROUTER_OPTION = new URLOption<>("router", (String) null);
     //默认不压缩
     public static final URLOption<String> COMPRESS_OPTION = new URLOption<>("compress", (String) null);
     /**
@@ -504,7 +557,6 @@ public class Constants {
     public static final URLOption<String> CANDIDATURE_OPTION = new URLOption<>("candidature", DEFAULT_CANDIDATURE);
 
     /*------------------------ consumer group配置 ------------------------*/
-    public static final URLOption<String> ALIAS_ADAPTIVE_OPTION = new URLOption<>("aliasAdaptive", "");
     public static final URLOption<Integer> DST_PARAM_OPTION = new URLOption<>("dstParam", (Integer) null);
     public static final URLOption<Boolean> MOCK_OPTION = new URLOption<>("mock", true);
     /**
@@ -514,7 +566,7 @@ public class Constants {
     /**
      * 分组路由选项
      */
-    public static final URLOption<String> GROUP_ROUTER_OPTION = new URLOption<>("groupRouter", "parameter");
+    public static final URLOption<String> GROUP_ROUTER_OPTION = new URLOption<>("groupRouter", DEFAULT_GROUP_ROUTER);
 
     /*------------------------ Provider配置 ------------------------*/
     public static final URLOption<Integer> WEIGHT_OPTION = new URLOption<>("weight", 100);
@@ -525,6 +577,8 @@ public class Constants {
     public static final URLOption<Boolean> LIMITER_OPTION = new URLOption<>("limiter", false);
     public static final URLOption<String> METHOD_EXCLUDE_OPTION = new URLOption<>("exclude", "");
     public static final URLOption<String> CONTEXT_PATH_OPTION = new URLOption<>("contextpath", "/");
+    public static final URLOption<Integer> FORKS_OPTION = new URLOption<>("forks", 2);
+    public static final URLOption<Boolean> METHOD_PRECOMPILATION = new URLOption<>("precompilation", Boolean.TRUE);
 
     public static final String JAVA_VERSION_KEY = "javaVersion";
 
@@ -582,14 +636,15 @@ public class Constants {
     public static final URLOption<Integer> QUEUES_OPTION = new URLOption<>("queues", 0);
     public static final URLOption<String> QUEUE_TYPE_OPTION = new URLOption<>("queueType", "normal");
 
-
-    /*------------------------ regisry配置 ------------------------*/
     public static final String REGISTRY_NAME_KEY = "name";
-    public static final URLOption<String> REGISTRY_BACKUP_PATH_OPTION = new URLOption<>("backupPath", (String) null);
-    public static final URLOption<Integer> REGISTRY_BACKUP_DATUM_OPTION = new URLOption<>("backupDatum", 3);
-    public static final URLOption<Boolean> SYSTEM_REFER_OPTION = new URLOption<>("systemRefer", Boolean.FALSE);
-    public static final URLOption<Long> TASK_RETRY_INTERVAL_OPTION = new URLOption<>("taskRetryInterval", 5000L);
+    public static final URLOption<Boolean> REGISTRY_BACKUP_ENABLED_OPTION = new URLOption<>("reg.backupEnabled", Boolean.TRUE);
+    public static final URLOption<String> REGISTRY_BACKUP_PATH_OPTION = new URLOption<>("reg.backupPath", (String) null);
+    public static final URLOption<Integer> REGISTRY_BACKUP_DATUM_OPTION = new URLOption<>("reg.backupDatum", 3);
+    public static final URLOption<Long> REGISTRY_BACKUP_INTERVAL_OPTION = new URLOption<>("reg.backupInterval", 10000L);
+    public static final URLOption<Long> REGISTRY_TASK_RETRY_INTERVAL_OPTION = new URLOption<>("reg.taskRetryInterval", 5000L);
+    public static final URLOption<Integer> REGISTRY_MAX_CONNECT_RETRY_TIMES_OPTION = new URLOption<>("reg.maxConnectRetryTimes", -1);
 
+    public static final URLOption<Boolean> SYSTEM_REFER_OPTION = new URLOption<>("systemRefer", Boolean.FALSE);
 
     public static final URLOption<Boolean> CACHE_OPTION = new URLOption<>("cache", false);
     /**
@@ -603,11 +658,16 @@ public class Constants {
     /**
      * 默认缓存键生成算法
      */
-    public static final String DEFAULT_CACHE_KEY_GENERATOR = "default";
+    public static final String JSON_CACHE_KEY_GENERATOR = "json";
+
+    /**
+     * 缓存键表达式
+     */
+    public static final String CACHE_KEY_EXPRESSION = "cacheKeyExpression";
     /**
      * 缓存键生成算法选项
      */
-    public static final URLOption<String> CACHE_KEY_GENERATOR_OPTION = new URLOption<>("cacheKeyGenerator", DEFAULT_CACHE_KEY_GENERATOR);
+    public static final URLOption<String> CACHE_KEY_GENERATOR_OPTION = new URLOption<>("cacheKeyGenerator", JSON_CACHE_KEY_GENERATOR);
     public static final URLOption<Integer> CACHE_EXPIRE_TIME_OPTION = new URLOption<>("cacheExpireTime", -1);
     public static final URLOption<Integer> CACHE_CAPACITY_OPTION = new URLOption<>("cacheCapacity", 10000);
     public static final URLOption<Boolean> CACHE_NULLABLE_OPTION = new URLOption<>("cacheNullable", Boolean.FALSE);
@@ -632,6 +692,7 @@ public class Constants {
 
     public static final URLOption<Boolean> TCP_NODELAY = new URLOption<>("tcpNoDelay", Boolean.TRUE);
     public static final String USE_EPOLL_KEY = "useEpoll";
+    public static final String REUSE_PORT_KEY = "reusePort";
 
     public static final URLOption<Boolean> BUFFER_POOLED_OPTION = new URLOption<>("buffer.pooled", false);
     public static final URLOption<Integer> INIT_SIZE_OPTION = new URLOption<>("initSize", 5);
@@ -646,16 +707,13 @@ public class Constants {
     public static final URLOption<Boolean> SO_KEEPALIVE_OPTION = new URLOption<>("soKeepAlive", Boolean.TRUE);
     public static final URLOption<Integer> SO_BACKLOG_OPTION = new URLOption<>("soBacklog", 35536);
     public static final URLOption<Integer> SO_TIMEOUT_OPTION = new URLOption<>("soTimeout", 10000);
-    public static final String REUSE_PORT_KEY = "reusePort";
+    public static final URLOption<Boolean> SO_REUSE_PORT_OPTION = new URLOption<>(REUSE_PORT_KEY, true);
+
 
     /**
      * 会话超时时间
      */
     public static final URLOption<Long> SESSION_TIMEOUT_OPTION = new URLOption<>("sessionTimeout", 90000L);
-    /**
-     * 发送心跳的超时时间
-     */
-    public static final URLOption<Integer> SEND_TIMEOUT_OPTION = new URLOption<>("sendTimeout", 5000);
     /**
      * 心跳时间间隔
      */
@@ -754,6 +812,11 @@ public class Constants {
     public static final URLOption<String> ADAPTIVE_CLUSTER_TP = new URLOption<>("adaptive.clusterTp", "tp30");
 
     /**
+     * GrpcType函数
+     */
+    public static final BiFunction<Class<?>, Method, GrpcType> GRPC_TYPE_FUNCTION = (c, m) -> GRPC_FACTORY.get().generate(c, m);
+
+    /**
      * 是否启用epoll
      *
      * @param url url对象波·
@@ -771,7 +834,7 @@ public class Constants {
      */
     public static boolean isLinux(final URL url) {
         try {
-            return url != null && OsType.valueOf(url.getString(OS_TYPE, OsType.OTHER.name())) == OsType.LINUX;
+            return url != null && OsType.valueOf(url.getString(KEY_OS_TYPE, OsType.OTHER.name())) == OsType.LINUX;
         } catch (IllegalArgumentException e) {
             return false;
         }
@@ -837,4 +900,37 @@ public class Constants {
     public static final URLOption<String> SS5_PASSWORD = new URLOption<>("ss5.password", (String) null);
 
     public static final URLOption<String> REST_ROOT = new URLOption<>("restRoot", "/");
+
+    /**
+     * 请求超时时间
+     */
+    public static final Head HEAD_TIMEOUT = new Head((byte) 1, Integer.class);
+    /**
+     * 回调函数对应的实例id
+     */
+    public static final Head HEAD_CALLBACK_INSID = new Head((byte) 5, String.class);
+    /**
+     * 客户端的版本
+     */
+    public static final Head HEAD_VERSION = new Head((byte) 7, Short.class);
+    /**
+     * 请求的语言（针对跨语言 1c++ 2lua）
+     */
+    public static final Head HEAD_SRC_LANGUAGE = new Head((byte) 8, Byte.class);
+    /**
+     * 返回结果（针对跨语言 0成功 1失败）
+     */
+    public static final Head HEAD_RESPONSE_CODE = new Head((byte) 9, Byte.class);
+    /**
+     * 检查消费者调用的提供者是否正常
+     */
+    public static final Head HEAD_CHECK_PROVIDER = new Head((byte) 10, String.class);
+    /**
+     * 兼容老版本的安全认证，检查是否认证成功（1成功，则反之）
+     */
+    public static final Head HEAD_CHECK_AUTH = new Head((byte) 11, String.class);
+    /**
+     * 兼容老版本的网关请求
+     */
+    public static final Head HEAD_GENERIC = new Head((byte) 12, Byte.class);
 }

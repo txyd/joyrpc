@@ -26,27 +26,27 @@ import io.joyrpc.exception.MethodOverloadException;
 import io.joyrpc.extension.MapParametric;
 import io.joyrpc.extension.Parametric;
 import io.joyrpc.extension.URL;
-import io.joyrpc.transport.session.DefaultSession;
 import io.joyrpc.util.ClassUtils;
+import io.joyrpc.util.GrpcMethod;
+import io.joyrpc.util.GrpcType;
 import io.joyrpc.util.StringUtils;
 
-import java.io.Serializable;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
-import static io.joyrpc.GenericService.GENERIC;
 import static io.joyrpc.constants.Constants.*;
 import static io.joyrpc.util.ClassUtils.*;
 
 /**
  * 调用对象
  */
-public class Invocation implements Serializable {
+public class Invocation implements Call {
 
     public static final String CLAZZ_NAME = "clazzName";
 
@@ -97,6 +97,10 @@ public class Invocation implements Serializable {
      */
     protected transient Method method;
     /**
+     * grpc类型信息
+     */
+    protected transient GrpcType grpcType;
+    /**
      * 所在的类，泛化调用的时候该对象可能为null
      */
     protected transient Class clazz;
@@ -119,9 +123,9 @@ public class Invocation implements Serializable {
     /**
      * 构造函数
      *
-     * @param className
-     * @param alias
-     * @param methodName
+     * @param className  接口名称
+     * @param alias      别名
+     * @param methodName 方法名称
      */
     public Invocation(String className, String alias, String methodName) {
         this(className, alias, methodName, null);
@@ -130,10 +134,10 @@ public class Invocation implements Serializable {
     /**
      * 构造函数
      *
-     * @param className
-     * @param alias
-     * @param methodName
-     * @param argClasses
+     * @param className  接口名称
+     * @param alias      别名
+     * @param methodName 方法名称
+     * @param argClasses 参数类型
      */
     public Invocation(String className, String alias, String methodName, Class[] argClasses) {
         this.className = className;
@@ -148,49 +152,89 @@ public class Invocation implements Serializable {
     /**
      * 构造函数
      *
-     * @param iface
-     * @param method
-     * @param args
+     * @param iface  接口
+     * @param method 方法
+     * @param args   参数
      */
     public Invocation(final Class iface, final Method method, final Object[] args) {
-        this(iface, null, method, args, method.getParameterTypes());
+        this(iface, null, method, args, method.getParameterTypes(), null);
     }
 
     /**
      * 构造函数
      *
-     * @param iface
-     * @param alias
-     * @param method
-     * @param args
+     * @param iface  接口
+     * @param alias  别名
+     * @param method 方法
+     * @param args   参数
      */
     public Invocation(final Class iface, final String alias, final Method method, final Object[] args) {
-        this(iface, alias, method, args, method.getParameterTypes());
+        this(iface, alias, method, args, method.getParameterTypes(), null);
     }
 
     /**
      * 构造函数
      *
-     * @param iface
-     * @param alias
-     * @param method
-     * @param args
-     * @param argTypes
+     * @param iface    接口
+     * @param alias    别名
+     * @param method   方法
+     * @param args     参数
+     * @param argTypes 类型
      */
     public Invocation(final Class iface, final String alias, final Method method, final Object[] args, final Class[] argTypes) {
+        this(iface, alias, method, args, argTypes, null);
+    }
+
+    /**
+     * 构造函数
+     *
+     * @param iface   接口
+     * @param alias   别名
+     * @param method  方法
+     * @param args    参数
+     * @param generic 泛化
+     */
+    public Invocation(final Class iface, final String alias, final Method method, final Object[] args, final Boolean generic) {
         this.clazz = iface;
         this.className = iface.getName();
         this.alias = alias;
         this.method = method;
         this.methodName = method.getName();
         this.args = args == null ? new Object[0] : args;
+        this.generic = generic;
+    }
+
+    /**
+     * 构造函数
+     *
+     * @param iface    接口
+     * @param alias    别名
+     * @param method   方法
+     * @param args     参数
+     * @param argTypes 类型
+     * @param generic  泛化
+     */
+    public Invocation(final Class iface, final String alias, final Method method, final Object[] args, final Class[] argTypes, final Boolean generic) {
+        this.clazz = iface;
+        this.className = iface.getName();
+        this.alias = alias;
+        this.method = method;
+        this.methodName = method.getName();
+        this.args = args == null ? new Object[0] : args;
+        this.generic = generic;
         setArgsType(argTypes);
     }
 
+    @Override
     public String[] getArgsType() {
         return argsType;
     }
 
+    /**
+     * 设置参数类型
+     *
+     * @param argsType 参数类名
+     */
     public void setArgsType(String[] argsType) {
         this.argsType = argsType;
         // 清空缓存
@@ -200,7 +244,7 @@ public class Invocation implements Serializable {
     /**
      * 设置参数类型，只在回调函数和解析请求的时候主动设置
      *
-     * @param argsType
+     * @param argsType 参数类型
      */
     public void setArgsType(Class[] argsType) {
         if (argsType == null) {
@@ -212,6 +256,18 @@ public class Invocation implements Serializable {
         }
     }
 
+    /**
+     * 设置参数类型
+     *
+     * @param argClasses 参数类
+     * @param argTypes   参数类名
+     */
+    public void setArgsType(Class[] argClasses, String[] argTypes) {
+        this.argClasses = argClasses;
+        this.argsType = argTypes;
+    }
+
+    @Override
     public Object[] getArgs() {
         return args;
     }
@@ -220,6 +276,7 @@ public class Invocation implements Serializable {
         this.args = args;
     }
 
+    @Override
     public Class[] getArgClasses() {
         if (argClasses == null) {
             //TODO 要以argsType优先，因为方法上的参数类型可能为接口
@@ -236,6 +293,7 @@ public class Invocation implements Serializable {
         return argClasses;
     }
 
+    @Override
     public String getClassName() {
         return className;
     }
@@ -244,6 +302,7 @@ public class Invocation implements Serializable {
         this.className = className;
     }
 
+    @Override
     public String getMethodName() {
         return methodName;
     }
@@ -252,6 +311,7 @@ public class Invocation implements Serializable {
         this.methodName = methodName;
     }
 
+    @Override
     public String getAlias() {
         return alias;
     }
@@ -260,6 +320,7 @@ public class Invocation implements Serializable {
         this.alias = alias;
     }
 
+    @Override
     public Method getMethod() {
         return method;
     }
@@ -268,6 +329,15 @@ public class Invocation implements Serializable {
         this.method = method;
     }
 
+    public GrpcType getGrpcType() {
+        return grpcType;
+    }
+
+    public void setGrpcType(GrpcType grpcType) {
+        this.grpcType = grpcType;
+    }
+
+    @Override
     public Class getClazz() {
         return clazz;
     }
@@ -276,6 +346,7 @@ public class Invocation implements Serializable {
         this.clazz = clazz;
     }
 
+    @Override
     public Object getObject() {
         return object;
     }
@@ -353,18 +424,14 @@ public class Invocation implements Serializable {
     /**
      * 移除扩展信息
      *
-     * @param key
+     * @param key 键
      * @return
      */
     public Object removeAttachment(final String key) {
         return key == null || attachments == null ? null : attachments.remove(key);
     }
 
-    /**
-     * 获取扩展属性
-     *
-     * @return
-     */
+    @Override
     public Map<String, Object> getAttachments() {
         return attachments;
     }
@@ -372,8 +439,8 @@ public class Invocation implements Serializable {
     /**
      * 获取扩展属性
      *
-     * @param key
-     * @return
+     * @param key 键
+     * @return 扩展属性
      */
     public <T> T getAttachment(final String key) {
         return attachments == null ? null : (T) attachments.get(key);
@@ -382,9 +449,9 @@ public class Invocation implements Serializable {
     /**
      * 获取扩展属性
      *
-     * @param key
+     * @param key          键
      * @param defaultValue 默认值
-     * @return
+     * @return 扩展属性
      */
     public <T> T getAttachment(final String key, final T defaultValue) {
         if (attachments == null) {
@@ -399,15 +466,11 @@ public class Invocation implements Serializable {
         return new MapParametric(attachments);
     }
 
-    /**
-     * 判断是否是泛型
-     *
-     * @return
-     */
+    @Override
     public boolean isGeneric() {
         if (generic == null) {
-            generic = GENERIC.test(clazz)
-                    || Boolean.TRUE.equals(getAttachment(Constants.GENERIC_OPTION.getName()));
+            Object attachment = attachments == null ? null : attachments.get(GENERIC_OPTION.getName());
+            generic = attachment == null ? Boolean.FALSE : Boolean.TRUE.equals(attachment);
         }
         return generic;
     }
@@ -424,42 +487,37 @@ public class Invocation implements Serializable {
     }
 
     /**
-     * 从会话恢复信心
+     * 构建调用对象
      *
-     * @param session
-     */
-    public void apply(final DefaultSession session) {
-        if (session == null) {
-            return;
-        }
-        //类名，如果不存在则从会话里面获取
-        if (className == null || className.isEmpty()) {
-            className = session.getInterfaceName();
-        }
-        if (alias == null || alias.isEmpty()) {
-            alias = session.getAlias();
-        }
-        if (getAttachment(HIDDEN_KEY_APPID) == null && getAttachment(HIDDEN_KEY_APPNAME) == null) {
-            addAttachment(HIDDEN_KEY_APPID, session.getRemoteAppId());
-            addAttachment(HIDDEN_KEY_APPNAME, session.getRemoteAppName());
-            addAttachment(HIDDEN_KEY_APPINSID, session.getRemoteAppIns());
-        }
-    }
-
-    /**
-     * 构建HTTP请求
-     *
-     * @param url
-     * @param headers
-     * @param supplier
-     * @return
+     * @param url        url
+     * @param parametric 参数
+     * @param supplier   异常提供者
+     * @return 调用对象
      * @throws ClassNotFoundException
      * @throws NoSuchMethodException
      * @throws MethodOverloadException
      */
-    public static Invocation build(final URL url, final Map<CharSequence, Object> headers, final Supplier<LafException> supplier)
+    public static Invocation build(final URL url, final Parametric parametric, final Supplier<LafException> supplier)
             throws ClassNotFoundException, NoSuchMethodException, MethodOverloadException {
-        Parametric parametric = new MapParametric(headers);
+        return build(url, parametric, null, supplier);
+    }
+
+    /**
+     * 构建调用对象
+     *
+     * @param url        url
+     * @param parametric 参数
+     * @param function   GrpcType函数
+     * @param supplier   异常提供者
+     * @return 调用对象
+     * @throws ClassNotFoundException
+     * @throws NoSuchMethodException
+     * @throws MethodOverloadException
+     */
+    public static Invocation build(final URL url, final Parametric parametric,
+                                   final BiFunction<Class<?>, Method, GrpcType> function,
+                                   final Supplier<LafException> supplier)
+            throws ClassNotFoundException, NoSuchMethodException, MethodOverloadException {
         String path = url.getPath();
         String[] parts = path == null ? new String[0] : StringUtils.split(path, '/');
         String className;
@@ -472,7 +530,7 @@ public class Invocation implements Serializable {
         } else if (parts.length == 2) {
             className = parts[0];
             methodName = parts[1];
-            alias = parametric.getString("alias", null);
+            alias = parametric.getString(ALIAS_OPTION);
             if (alias == null || alias.isEmpty()) {
                 throw supplier.get();
             }
@@ -480,7 +538,17 @@ public class Invocation implements Serializable {
             throw supplier.get();
         }
         Class ifaceClass = forName(className);
-        Method method = getPublicMethod(ifaceClass, methodName);
+        //获取方法信息
+        Method method;
+        GrpcType grpcType = null;
+        if (function == null) {
+            method = getPublicMethod(ifaceClass, methodName);
+        } else {
+            //需要GrpcType信息
+            GrpcMethod grpcMethod = getPublicMethod(ifaceClass, methodName, function);
+            method = grpcMethod.getMethod();
+            grpcType = grpcMethod.getType();
+        }
         Class[] paramTypes = method.getParameterTypes();
 
         Invocation invocation = new Invocation(className, alias, methodName, paramTypes).
@@ -490,15 +558,30 @@ public class Invocation implements Serializable {
                 addAttachment(HIDDEN_KEY_APPINSID, parametric.getString(KEY_APPINSID));
         invocation.setClazz(ifaceClass);
         invocation.setMethod(method);
+        invocation.setGrpcType(grpcType);
         //隐式传参
-        String key;
-        for (Map.Entry<CharSequence, Object> entry : headers.entrySet()) {
-            key = entry.getKey().toString();
+        parametric.foreach((key, value) -> {
             if (!key.isEmpty() && key.charAt(0) == Constants.HIDE_KEY_PREFIX) {
-                invocation.addAttachment(key, entry.getValue());
+                invocation.addAttachment(key, value);
             }
-        }
+        });
         return invocation;
+    }
+
+    /**
+     * 构建调用对象
+     *
+     * @param url      url
+     * @param headers  http头
+     * @param supplier 异常提供者
+     * @return
+     * @throws ClassNotFoundException
+     * @throws NoSuchMethodException
+     * @throws MethodOverloadException
+     */
+    public static Invocation build(final URL url, final Map<CharSequence, Object> headers, final Supplier<LafException> supplier)
+            throws ClassNotFoundException, NoSuchMethodException, MethodOverloadException {
+        return build(url, new MapParametric(headers), null, supplier);
     }
 
     @Override

@@ -5,14 +5,14 @@
     <parent>
         <artifactId>joyrpc-codec</artifactId>
         <groupId>io.joyrpc</groupId>
-        <version>1.0.5-SNAPSHOT</version>
+        <version>1.0.6-SNAPSHOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
     <artifactId>joyrpc-serialization-fastjson</artifactId>
 
     <properties>
-        <fastjson.version>1.2.61</fastjson.version>
+        <fastjson.version>1.2.68</fastjson.version>
     </properties>
 
     <dependencies>

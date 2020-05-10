@@ -9,9 +9,9 @@ package io.joyrpc.invoker;
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -25,27 +25,22 @@ import io.joyrpc.Plugin;
 import io.joyrpc.Result;
 import io.joyrpc.codec.compression.Compression;
 import io.joyrpc.constants.Constants;
-import io.joyrpc.constants.ExceptionCode;
-import io.joyrpc.constants.HeadKey;
 import io.joyrpc.context.GlobalContext;
-import io.joyrpc.exception.InitializationException;
 import io.joyrpc.exception.RpcException;
+import io.joyrpc.extension.MapParametric;
 import io.joyrpc.extension.Parametric;
 import io.joyrpc.extension.URL;
 import io.joyrpc.protocol.MsgType;
 import io.joyrpc.protocol.message.*;
+import io.joyrpc.thread.NamedThreadFactory;
 import io.joyrpc.thread.ThreadPool;
 import io.joyrpc.transport.session.Session;
 import io.joyrpc.transport.transport.ChannelTransport;
 import io.joyrpc.transport.transport.Transport;
-import io.joyrpc.thread.NamedThreadFactory;
 import io.joyrpc.util.network.Ipv4;
 
 import java.io.Closeable;
 import java.lang.reflect.Method;
-import java.lang.reflect.Parameter;
-import java.lang.reflect.ParameterizedType;
-import java.lang.reflect.Type;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,7 +51,8 @@ import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 import static io.joyrpc.Plugin.PROXY;
-import static io.joyrpc.util.ClassUtils.getPublicMethod;
+import static io.joyrpc.constants.Constants.HEAD_CALLBACK_INSID;
+import static io.joyrpc.constants.Constants.HIDDEN_KEY_TIME_OUT;
 
 /**
  * 回调管理器
@@ -81,65 +77,19 @@ public class CallbackManager implements Closeable {
     protected static final AtomicLong counter = new AtomicLong(0);
 
     /**
-     * 回调元数据
-     */
-    protected Map<Class, Map<String, CallbackMeta>> metas = new ConcurrentHashMap<>();
-
-    /**
      * 消费者回调
      */
-    protected CallbackContainer consumer = new ConsumerCallbackContainer(this::getCallbackMeta);
+    protected CallbackContainer consumer = new ConsumerCallbackContainer();
 
     /**
      * 提供者回调
      */
-    protected CallbackContainer producer = new ProducerCallbackContainer(this::getCallbackMeta);
+    protected CallbackContainer producer = new ProducerCallbackContainer();
 
     /**
      * 回调线程池
      */
     protected ThreadPoolExecutor callbackThreadPool;
-
-    /**
-     * 注册接口
-     *
-     * @param iface
-     */
-    public boolean register(final Class iface) {
-        if (iface == null) {
-            return false;
-        }
-        //获取该类型有回调参数的方法信息
-        List<CallbackMeta> callbacks = new LinkedList<>();
-        List<Method> methods = getPublicMethod(iface);
-        for (Method method : methods) {
-            CallbackMeta meta = compute(method);
-            if (meta != null) {
-                // 需要解析出Callback<T>里的T的实际类型
-                Type type = meta.parameter.getParameterizedType();
-                if (type instanceof ParameterizedType) {
-                    Type[] actualTypes = ((ParameterizedType) type).getActualTypeArguments();
-                    if (actualTypes.length == 2) {
-                        meta.parameterType = getRealClass(actualTypes[0]);
-                        meta.returnType = getRealClass(actualTypes[1]);
-                    }
-                }
-                if (meta.parameterType == null) {
-                    // 抛出转换异常 表示为"?"泛化类型， java.lang.ClassCastException:
-                    throw new InitializationException(String.format("Method Must set actual type of Callback, %s", method), ExceptionCode.COMMON_CALL_BACK_ERROR);
-                }
-                callbacks.add(meta);
-            }
-        }
-        //如果有回调参数的方法
-        if (!callbacks.isEmpty()) {
-            Map<String, CallbackMeta> methodMetas = metas.computeIfAbsent(iface, o -> new ConcurrentHashMap<>(callbacks.size()));
-            callbacks.forEach(o -> methodMetas.put(o.method.getName(), o));
-
-            return true;
-        }
-        return false;
-    }
 
     public CallbackContainer getConsumer() {
         return consumer;
@@ -152,14 +102,14 @@ public class CallbackManager implements Closeable {
     /**
      * 获取线程池
      *
-     * @return
+     * @return 回调线程池
      */
     public ThreadPoolExecutor getThreadPool() {
         if (callbackThreadPool == null) {
             synchronized (this) {
                 if (callbackThreadPool == null) {
 
-                    Parametric parametric = GlobalContext.asParametric(Constants.GLOBAL_SETTING);
+                    Parametric parametric = new MapParametric(GlobalContext.getGlobalSetting());
                     int coreSize = parametric.getPositive(Constants.SETTING_CALLBACK_POOL_CORE_SIZE, DEFAULT_CLIENT_CALLBACK_CORE_THREADS);
                     int maxSize = parametric.getPositive(Constants.SETTING_CALLBACK_POOL_MAX_SIZE, DEFAULT_CLIENT_CALLBACK_MAX_THREADS);
                     int queueSize = parametric.getPositive(Constants.SETTING_CALLBACK_POOL_QUEUE, DEFAULT_CLIENT_CALLBACK_QUEUE);
@@ -181,129 +131,6 @@ public class CallbackManager implements Closeable {
     public void close() {
         consumer.close();
         producer.close();
-        metas.clear();
-    }
-
-    /**
-     * 回去回调元数据
-     *
-     * @param clazz
-     * @param methodName
-     * @return
-     */
-    protected CallbackMeta getCallbackMeta(final Class clazz, final String methodName) {
-        if (clazz == null || methodName == null) {
-            return null;
-        }
-        Map<String, CallbackMeta> methodMetas = metas.get(clazz);
-        return methodMetas == null ? null : methodMetas.get(methodName);
-    }
-
-    /**
-     * 生成回调元数据
-     *
-     * @param method
-     * @return
-     */
-    protected CallbackMeta compute(final Method method) {
-        Parameter result = null;
-        int index = 0;
-        Parameter[] parameters = method.getParameters();
-        for (int i = 0; i < parameters.length; i++) {
-            if (isCallbackInterface(parameters[i].getType())) {
-                if (result != null) {
-                    throw new InitializationException("Illegal callback parameter at method " + method.getName()
-                            + ",just allow one callback parameter", ExceptionCode.COMMON_CALL_BACK_ERROR);
-                }
-                result = parameters[i];
-                index = i;
-            }
-        }
-        return result == null ? null : new CallbackMeta(method, index, result);
-    }
-
-    /**
-     * 是否是回调接口
-     *
-     * @param clazz
-     * @return
-     */
-    public static boolean isCallbackInterface(final Class clazz) {
-        //约定规范只能是Callback类，不能是子类或实现类
-        if (Callback.class.isAssignableFrom(clazz)) {
-            return true;
-        }
-        return false;
-    }
-
-    /**
-     * 获取真实类型
-     *
-     * @param actualType
-     * @return
-     */
-    protected Class getRealClass(final Type actualType) {
-        if (actualType instanceof ParameterizedType) {
-            // 例如 Callback<List<String>>
-            Type rawType = ((ParameterizedType) actualType).getRawType();
-            if (rawType instanceof Class) {
-                return (Class) rawType;
-            }
-        } else if (actualType instanceof Class) {
-            // 普通的 Callback<String>
-            return (Class) actualType;
-        }
-        return null;
-    }
-
-
-    /**
-     * 回调元数据
-     */
-    protected static class CallbackMeta {
-        /**
-         * 所属方法
-         */
-        protected Method method;
-        /**
-         * 索引
-         */
-        protected int index;
-        /**
-         * 参数索引
-         */
-        protected Parameter parameter;
-        /**
-         * 参数真实类型
-         */
-        protected Class parameterType;
-        /**
-         * 返回值真实类型
-         */
-        protected Class returnType;
-
-        public CallbackMeta(Method method, int index, Parameter parameter) {
-            this.method = method;
-            this.index = index;
-            this.parameter = parameter;
-        }
-
-        public int getIndex() {
-            return index;
-        }
-
-        public Parameter getParameter() {
-            return parameter;
-        }
-
-        public Class getParameterType() {
-            return parameterType;
-        }
-
-        public Class getReturnType() {
-            return returnType;
-        }
-
     }
 
     /**
@@ -320,12 +147,6 @@ public class CallbackManager implements Closeable {
          * 回调
          */
         protected Map<Transport, Set<String>> channelIds = new ConcurrentHashMap<>();
-
-        protected BiFunction<Class, String, CallbackMeta> function;
-
-        public AbstractCallbackContainer(BiFunction<Class, String, CallbackMeta> function) {
-            this.function = function;
-        }
 
         @Override
         public List<CallbackInvoker> removeCallback(final ChannelTransport transport) {
@@ -375,13 +196,13 @@ public class CallbackManager implements Closeable {
         /**
          * 添加调用器
          *
-         * @param callbackId
-         * @param transport
-         * @param function
+         * @param callbackId 回调ID
+         * @param transport  通道
+         * @param function   函数
          */
         protected T add(String callbackId, ChannelTransport transport, BiFunction<String, ChannelTransport, T> function) {
-            channelIds.computeIfAbsent(transport, c -> new CopyOnWriteArraySet()).add(callbackId);
             T callback = function.apply(callbackId, transport);
+            channelIds.computeIfAbsent(transport, c -> new CopyOnWriteArraySet<>()).add(callbackId);
             callbacks.put(callbackId, callback);
             return callback;
         }
@@ -392,24 +213,20 @@ public class CallbackManager implements Closeable {
      */
     protected static class ConsumerCallbackContainer extends AbstractCallbackContainer<ConsumerCallbackInvoker> {
 
-        public ConsumerCallbackContainer(BiFunction<Class, String, CallbackMeta> function) {
-            super(function);
-        }
-
         @Override
         public void addCallback(final RequestMessage<Invocation> request, final ChannelTransport transport) {
-            Invocation invocation = request.getPayLoad();
-            CallbackMeta meta = function.apply(invocation.getClazz(), invocation.getMethodName());
+            CallbackMethod meta = request.getOption().getCallback();
             if (meta == null) {
                 return;
             }
             int port = transport.getLocalAddress().getPort();
+            Invocation invocation = request.getPayLoad();
             Object[] args = invocation.getArgs();
             Object callbackArg = args[meta.index];
-            if (callbackArg == null || !(callbackArg instanceof Callback)) {
+            if (!(callbackArg instanceof Callback)) {
                 throw new RpcException(String.format("Callback parameter be null!,%s", invocation.getMethod()));
             }
-            Callback callback = (Callback) callbackArg;
+            Callback<?, ?> callback = (Callback<?, ?>) callbackArg;
             String ip = Ipv4.getLocalIp();
             int pid = GlobalContext.getPid();
             String callbackId = new StringBuilder(100).append(ip).append("_")
@@ -420,10 +237,10 @@ public class CallbackManager implements Closeable {
             //注入回调ID，便于外部感知，再需要的时候进行删除
             callback.setCallbackId(callbackId);
             //header设置callbackId
-            request.getHeader().addAttribute(HeadKey.callbackInsId, callbackId);
+            request.getHeader().addAttribute(HEAD_CALLBACK_INSID, callbackId);
             //callback参数置空
             args[meta.index] = null;
-            add(callbackId, transport, (c, t) -> new ConsumerCallbackInvoker(callback, t));
+            add(callbackId, transport, (c, t) -> new ConsumerCallbackInvoker<>(callback, t));
         }
     }
 
@@ -432,25 +249,21 @@ public class CallbackManager implements Closeable {
      */
     protected static class ProducerCallbackContainer extends AbstractCallbackContainer<ProducerCallbackInvoker> {
 
-        public ProducerCallbackContainer(BiFunction<Class, String, CallbackMeta> function) {
-            super(function);
-        }
-
         @Override
         public void addCallback(final RequestMessage<Invocation> request, final ChannelTransport transport) {
-            Invocation invocation = request.getPayLoad();
-            MessageHeader header = request.getHeader();
-            CallbackMeta meta = function.apply(invocation.getClazz(), invocation.getMethodName());
+            CallbackMethod meta = request.getOption().getCallback();
             if (meta == null) {
                 return;
             }
-            String callbackId = header.getAttribute(HeadKey.callbackInsId).toString();
+            Invocation invocation = request.getPayLoad();
+            MessageHeader header = request.getHeader();
+            String callbackId = (String) header.getAttribute(HEAD_CALLBACK_INSID);
             if (callbackId == null || callbackId.isEmpty()) {
-                throw new RuntimeException(" Server side handle RequestMessage callbackId can not be null! ");
+                throw new RpcException("callbackId can not be empty! ");
             }
-            Class<? extends Callback> callbackClass = invocation.getArgClasses()[meta.index];
-            ProducerCallbackInvoker handler = add(callbackId, transport,
-                    (c, t) -> new ProducerCallbackInvoker(c, invocation.getClazz(),
+            Class<? extends Callback<?, ?>> callbackClass = invocation.getArgClasses()[meta.index];
+            ProducerCallbackInvoker<?, ?> handler = add(callbackId, transport,
+                    (c, t) -> new ProducerCallbackInvoker<>(c, invocation.getClazz(),
                             meta.getParameterType(), callbackClass, header, t, k -> callbacks.remove(k)));
 
             invocation.getArgs()[meta.index] = handler.callback;
@@ -460,15 +273,15 @@ public class CallbackManager implements Closeable {
     /**
      * 消费者注册用于处理服务端回调消息的处理器
      */
-    protected static class ConsumerCallbackInvoker implements CallbackInvoker {
+    protected static class ConsumerCallbackInvoker<Q, S> implements CallbackInvoker {
         /**
          * 回调
          */
-        protected Callback callback;
+        protected Callback<Q, S> callback;
         //通道
         protected ChannelTransport transport;
 
-        public ConsumerCallbackInvoker(Callback callback, ChannelTransport transport) {
+        public ConsumerCallbackInvoker(Callback<Q, S> callback, ChannelTransport transport) {
             this.callback = callback;
             this.transport = transport;
         }
@@ -476,7 +289,7 @@ public class CallbackManager implements Closeable {
         @Override
         public CompletableFuture<Result> invoke(RequestMessage<Invocation> request) {
             try {
-                return CompletableFuture.completedFuture(new Result(request.getContext(), callback.notify(request.getPayLoad().getArgs()[0])));
+                return CompletableFuture.completedFuture(new Result(request.getContext(), callback.notify((Q) request.getPayLoad().getArgs()[0])));
             } catch (Exception e) {
                 return CompletableFuture.completedFuture(new Result(request.getContext(), e));
             }
@@ -488,7 +301,7 @@ public class CallbackManager implements Closeable {
         }
 
         @Override
-        public Callback getCallback() {
+        public Callback<Q, S> getCallback() {
             return callback;
         }
     }
@@ -504,7 +317,7 @@ public class CallbackManager implements Closeable {
         /**
          * 接口楼
          */
-        protected Class interfaceClass;
+        protected Class<?> interfaceClass;
         /**
          * 参数类型
          */
@@ -528,9 +341,9 @@ public class CallbackManager implements Closeable {
 
 
         public ProducerCallbackInvoker(final String id,
-                                       final Class interfaceClass,
+                                       final Class<?> interfaceClass,
                                        final Class<S> parameterType,
-                                       final Class<? extends Callback> callbackClass,
+                                       final Class<? extends Callback<?, ?>> callbackClass,
                                        final MessageHeader header,
                                        final ChannelTransport transport,
                                        final Consumer<String> closing) {
@@ -540,7 +353,7 @@ public class CallbackManager implements Closeable {
             this.header = header;
             this.transport = transport;
             this.closing = closing;
-            this.callback = PROXY.get().getProxy(callbackClass, this::doInvoke);
+            this.callback = (Callback<Q, S>) PROXY.get().getProxy(callbackClass, this::doInvoke);
         }
 
         @Override
@@ -566,11 +379,11 @@ public class CallbackManager implements Closeable {
         /**
          * 调用
          *
-         * @param proxy
-         * @param method
-         * @param param
-         * @return
-         * @throws Throwable
+         * @param proxy  对象
+         * @param method 方法
+         * @param param  参数
+         * @return 结果
+         * @throws Throwable 异常
          */
         protected Object doInvoke(final Object proxy, final Method method, final Object[] param) throws Throwable {
             String methodName = method.getName();
@@ -584,23 +397,34 @@ public class CallbackManager implements Closeable {
             }
             Session session = transport.session();
             //回调不需要别名,需要设置真实的参数类型
-            RequestMessage<Invocation> request = RequestMessage.build(
-                    new Invocation(interfaceClass, null, method, param, new Class[]{parameterType}));
+            Invocation invocation = new Invocation(interfaceClass, null, method, param, new Class[]{parameterType});
+            //已经设置了创建时间
+            RequestMessage<Invocation> request = RequestMessage.build(invocation);
             MessageHeader rh = request.getHeader();
-            //TODO 应答的压缩格式，老版协议没有会话
-            rh.setCompression(session == null ? Compression.NONE : session.getCompressionType());
+            //回调请求
+            rh.setMsgType(MsgType.CallbackReq.getType());
             rh.setProtocolType(header.getProtocolType());
             rh.setSerialization(header.getSerialization());
-            rh.setMsgType(MsgType.CallbackReq.getType());
-            rh.addAttribute(HeadKey.callbackInsId, id);
+            //TODO 应答的压缩格式，老版协议没有会话
+            rh.setCompression(session == null ? Compression.NONE : session.getCompressionType());
+            rh.addAttribute(HEAD_CALLBACK_INSID, id);
+            //TODO 缺乏参数注入
+            //超时时间放在后面，Invocation已经注入了请求上下文参数，隐藏参数等等
+            if (request.getHeader().getTimeout() <= 0) {
+                Parametric parametric = new MapParametric(invocation.getAttachments());
+                int timeout = parametric.getPositive(HIDDEN_KEY_TIME_OUT, Constants.DEFAULT_TIMEOUT);
+                //超时时间
+                request.setTimeout(timeout);
+                rh.setTimeout(timeout);
+            }
 
             //为了兼容，目前只支持同步调用
-            ResponseMessage<ResponsePayload> message = (ResponseMessage) transport.sync(request, 3000);
-            ResponsePayload responsePayload = message.getPayLoad();
-            if (responsePayload.isError()) {
-                throw responsePayload.getException();
+            ResponseMessage<ResponsePayload> message = (ResponseMessage<ResponsePayload>) transport.sync(request, request.getTimeout());
+            ResponsePayload payLoad = message.getPayLoad();
+            if (payLoad.isError()) {
+                throw payLoad.getException();
             }
-            return responsePayload.getResponse();
+            return payLoad.getResponse();
         }
 
     }

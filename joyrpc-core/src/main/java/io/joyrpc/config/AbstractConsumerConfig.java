@@ -26,10 +26,7 @@ import io.joyrpc.Result;
 import io.joyrpc.annotation.Alias;
 import io.joyrpc.annotation.Service;
 import io.joyrpc.cluster.candidate.Candidature;
-import io.joyrpc.cluster.distribution.ExceptionPredication;
-import io.joyrpc.cluster.distribution.LoadBalance;
-import io.joyrpc.cluster.distribution.Route;
-import io.joyrpc.cluster.distribution.Router;
+import io.joyrpc.cluster.distribution.*;
 import io.joyrpc.cluster.event.NodeEvent;
 import io.joyrpc.codec.serialization.Serialization;
 import io.joyrpc.config.validator.ValidatePlugin;
@@ -37,9 +34,13 @@ import io.joyrpc.constants.Constants;
 import io.joyrpc.constants.ExceptionCode;
 import io.joyrpc.context.GlobalContext;
 import io.joyrpc.context.RequestContext;
+import io.joyrpc.context.RequestContext.InnerContext;
+import io.joyrpc.context.injection.Transmit;
 import io.joyrpc.event.EventHandler;
 import io.joyrpc.exception.InitializationException;
 import io.joyrpc.exception.RpcException;
+import io.joyrpc.extension.MapParametric;
+import io.joyrpc.extension.Parametric;
 import io.joyrpc.extension.URL;
 import io.joyrpc.protocol.message.Invocation;
 import io.joyrpc.protocol.message.RequestMessage;
@@ -59,7 +60,6 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -67,6 +67,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
 import static io.joyrpc.GenericService.GENERIC;
+import static io.joyrpc.Plugin.TRANSMIT;
 import static io.joyrpc.constants.Constants.*;
 import static io.joyrpc.util.ClassUtils.isReturnFuture;
 import static io.joyrpc.util.Status.*;
@@ -93,12 +94,12 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
      */
     protected Boolean generic = false;
     /**
-     * 集群处理，默认是failfast
+     * 集群处理算法
      */
-    @ValidatePlugin(extensible = Route.class, name = "ROUTE", defaultValue = DEFAULT_ROUTE)
+    @ValidatePlugin(extensible = Router.class, name = "ROUTER", defaultValue = DEFAULT_ROUTER)
     protected String cluster;
     /**
-     * The Loadbalance. 负载均衡
+     * 负载均衡算法
      */
     @ValidatePlugin(extensible = LoadBalance.class, name = "LOADBALANCE", defaultValue = DEFAULT_LOADBALANCE)
     protected String loadbalance;
@@ -133,9 +134,13 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
     @ValidatePlugin(extensible = Candidature.class, name = "CANDIDATURE", defaultValue = DEFAULT_CANDIDATURE)
     protected String candidature;
     /**
-     * The Retries. 失败后重试次数
+     * 失败最大重试次数
      */
     protected Integer retries;
+    /**
+     * 每个节点只调用一次
+     */
+    protected Boolean retryOnlyOncePerNode;
     /**
      * 可以重试的逗号分隔的异常全路径类名
      */
@@ -146,16 +151,25 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
     @ValidatePlugin(extensible = ExceptionPredication.class, name = "EXCEPTION_PREDICATION")
     protected String failoverPredication;
     /**
+     * 异常重试目标节点选择器
+     */
+    @ValidatePlugin(extensible = FailoverSelector.class, name = "FAILOVER_SELECTOR", defaultValue = DEFAULT_FAILOVER_SELECTOR)
+    protected String failoverSelector;
+    /**
+     * 并行分发数量，在采用并行分发策略有效
+     */
+    protected Integer forks;
+    /**
      * channel创建模式
      * shared:共享(默认),unshared:独享
      */
-    @ValidatePlugin(extensible = ChannelManagerFactory.class, name = "CHANNEL_MANAGER_FACTORY", defaultValue = DEFAULT_HANNEL_FACTORY)
+    @ValidatePlugin(extensible = ChannelManagerFactory.class, name = "CHANNEL_MANAGER_FACTORY", defaultValue = DEFAULT_CHANNEL_FACTORY)
     protected String channelFactory;
     /**
-     * 路由规则
+     * 节点选择器
      */
-    @ValidatePlugin(extensible = Router.class, name = "ROUTER")
-    protected String router;
+    @ValidatePlugin(extensible = NodeSelector.class, name = "NODE_SELECTOR")
+    protected String nodeSelector;
     /**
      * 预热权重
      */
@@ -211,10 +225,13 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
         this.minSize = config.minSize;
         this.candidature = config.candidature;
         this.retries = config.retries;
+        this.retryOnlyOncePerNode = config.retryOnlyOncePerNode;
         this.failoverWhenThrowable = config.failoverWhenThrowable;
         this.failoverPredication = config.failoverPredication;
+        this.failoverSelector = config.failoverSelector;
+        this.forks = config.forks;
         this.channelFactory = config.channelFactory;
-        this.router = config.router;
+        this.nodeSelector = config.nodeSelector;
         this.warmupWeight = config.warmupWeight;
         this.warmupDuration = config.warmupDuration;
     }
@@ -343,7 +360,8 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
      * @return
      */
     public CompletableFuture<Void> unrefer() {
-        return unrefer(GlobalContext.asParametric().getBoolean(Constants.GRACEFULLY_SHUTDOWN_OPTION));
+        Parametric parametric = new MapParametric(GlobalContext.getContext());
+        return unrefer(parametric.getBoolean(Constants.GRACEFULLY_SHUTDOWN_OPTION));
     }
 
     /**
@@ -463,6 +481,46 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
         this.retries = retries;
     }
 
+    public Boolean getRetryOnlyOncePerNode() {
+        return retryOnlyOncePerNode;
+    }
+
+    public void setRetryOnlyOncePerNode(Boolean retryOnlyOncePerNode) {
+        this.retryOnlyOncePerNode = retryOnlyOncePerNode;
+    }
+
+    public String getFailoverWhenThrowable() {
+        return failoverWhenThrowable;
+    }
+
+    public void setFailoverWhenThrowable(String failoverWhenThrowable) {
+        this.failoverWhenThrowable = failoverWhenThrowable;
+    }
+
+    public String getFailoverPredication() {
+        return failoverPredication;
+    }
+
+    public void setFailoverPredication(String failoverPredication) {
+        this.failoverPredication = failoverPredication;
+    }
+
+    public String getFailoverSelector() {
+        return failoverSelector;
+    }
+
+    public void setFailoverSelector(String failoverSelector) {
+        this.failoverSelector = failoverSelector;
+    }
+
+    public Integer getForks() {
+        return forks;
+    }
+
+    public void setForks(Integer forks) {
+        this.forks = forks;
+    }
+
     public String getLoadbalance() {
         return loadbalance;
     }
@@ -471,7 +529,7 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
         this.loadbalance = loadbalance;
     }
 
-    public Boolean isGeneric() {
+    public Boolean getGeneric() {
         return generic;
     }
 
@@ -487,7 +545,7 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
         this.sticky = sticky;
     }
 
-    public Boolean isCheck() {
+    public Boolean getCheck() {
         return check;
     }
 
@@ -503,7 +561,7 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
         this.serialization = serialization;
     }
 
-    public Boolean isInjvm() {
+    public Boolean getInjvm() {
         return injvm;
     }
 
@@ -511,12 +569,12 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
         this.injvm = injvm;
     }
 
-    public String getRouter() {
-        return router;
+    public String getNodeSelector() {
+        return nodeSelector;
     }
 
-    public void setRouter(String router) {
-        this.router = router;
+    public void setNodeSelector(String nodeSelector) {
+        this.nodeSelector = nodeSelector;
     }
 
     public Integer getInitSize() {
@@ -541,14 +599,6 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
 
     public void setCandidature(String candidature) {
         this.candidature = candidature;
-    }
-
-    public String getFailoverWhenThrowable() {
-        return failoverWhenThrowable;
-    }
-
-    public void setFailoverWhenThrowable(String failoverWhenThrowable) {
-        this.failoverWhenThrowable = failoverWhenThrowable;
     }
 
     public String getChannelFactory() {
@@ -612,24 +662,27 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
             }
         }
         addElement2Map(params, Constants.GENERIC_OPTION, generic);
-        addElement2Map(params, Constants.ROUTE_OPTION, cluster);
+        addElement2Map(params, Constants.ROUTER_OPTION, cluster);
         addElement2Map(params, Constants.RETRIES_OPTION, retries);
+        addElement2Map(params, Constants.RETRY_ONLY_ONCE_PER_NODE_OPTION, retryOnlyOncePerNode);
+        addElement2Map(params, Constants.FAILOVER_WHEN_THROWABLE_OPTION, failoverWhenThrowable);
+        addElement2Map(params, Constants.FAILOVER_PREDICATION_OPTION, failoverPredication);
+        addElement2Map(params, Constants.FAILOVER_SELECTOR_OPTION, failoverSelector);
+        addElement2Map(params, Constants.FORKS_OPTION, forks);
         addElement2Map(params, Constants.LOADBALANCE_OPTION, loadbalance);
         addElement2Map(params, Constants.IN_JVM_OPTION, injvm);
         addElement2Map(params, Constants.STICKY_OPTION, sticky);
         addElement2Map(params, Constants.CHECK_OPTION, check);
         addElement2Map(params, Constants.SERIALIZATION_OPTION, serialization);
-        addElement2Map(params, Constants.ROUTER_OPTION, router);
-        addElement2Map(params, INIT_SIZE_OPTION, initSize);
-        addElement2Map(params, MIN_SIZE_OPTION, minSize);
+        addElement2Map(params, Constants.NODE_SELECTOR_OPTION, nodeSelector);
+        addElement2Map(params, Constants.INIT_SIZE_OPTION, initSize);
+        addElement2Map(params, Constants.MIN_SIZE_OPTION, minSize);
         addElement2Map(params, Constants.CANDIDATURE_OPTION, candidature);
         addElement2Map(params, Constants.ROLE_OPTION, Constants.SIDE_CONSUMER);
         addElement2Map(params, Constants.TIMESTAMP_KEY, String.valueOf(SystemClock.now()));
-        addElement2Map(params, Constants.FAILOVER_WHEN_THROWABLE_OPTION, failoverWhenThrowable);
-        addElement2Map(params, Constants.FAILOVER_PREDICATION_OPTION, failoverPredication);
         addElement2Map(params, Constants.CHANNEL_FACTORY_OPTION, channelFactory);
-        addElement2Map(params, WARMUP_ORIGIN_WEIGHT_OPTION, warmupWeight);
-        addElement2Map(params, WARMUP_DURATION_OPTION, warmupDuration);
+        addElement2Map(params, Constants.WARMUP_ORIGIN_WEIGHT_OPTION, warmupWeight);
+        addElement2Map(params, Constants.WARMUP_DURATION_OPTION, warmupDuration);
         return params;
     }
 
@@ -730,7 +783,8 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
          * @return
          */
         public CompletableFuture<Void> close() {
-            return close(GlobalContext.asParametric().getBoolean(Constants.GRACEFULLY_SHUTDOWN_OPTION));
+            Parametric parametric = new MapParametric(GlobalContext.getContext());
+            return close(parametric.getBoolean(Constants.GRACEFULLY_SHUTDOWN_OPTION));
         }
 
         /**
@@ -835,6 +889,11 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
         protected Map<String, Optional<MethodHandle>> handles = new ConcurrentHashMap<>();
 
         /**
+         * 透传插件
+         */
+        protected Iterable<Transmit> transmits = TRANSMIT.extensions();
+
+        /**
          * 构造函数
          *
          * @param invoker
@@ -866,18 +925,27 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
             RequestContext context = RequestContext.getContext();
             //上下文的异步必须设置成completeFuture
             context.setAsync(isReturnFuture);
-            //构造请求消息
-            RequestMessage<Invocation> request = RequestMessage.build(new Invocation(iface, method, param));
+            //构造请求消息，参数类型放在Refer里面设置，使用缓存避免每次计算加快性能
+            Invocation invocation = new Invocation(iface, null, method, param, generic);
+            RequestMessage<Invocation> request = RequestMessage.build(invocation);
             //分组Failover调用，需要在这里设置创建时间和超时时间，不能再Refer里面。否则会重置。
             request.setCreateTime(SystemClock.now());
             //超时时间为0，Refer会自动修正，便于分组重试
-            request.getHeader().
-
-                    setTimeout(0);
+            request.getHeader().setTimeout(0);
             //当前线程
             request.setThread(Thread.currentThread());
             //当前线程上下文
             request.setContext(context);
+            //实际的方法名称
+            if (generic) {
+                request.setMethodName(param[0] == null ? null : param[0].toString());
+                if (request.getMethodName() == null || request.getMethodName().isEmpty()) {
+                    //泛化调用没有传递方法名称
+                    throw new IllegalArgumentException(String.format("the method argument of GenericService.%s can not be empty.", method.getName()));
+                }
+            } else {
+                request.setMethodName(method.getName());
+            }
             Object response = doInvoke(invoker, request, isAsync);
             if (isAsync) {
                 if (isReturnFuture) {
@@ -949,15 +1017,15 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
 
         /**
          * 这个方法用来做 Trace 追踪的增强点，不要随便修改
+         *
+         * @param invoker 调用器
+         * @param request 请求
+         * @param async   异步标识
+         * @return 返回值
+         * @throws Throwable 异常
          */
         protected Object doInvoke(Invoker invoker, RequestMessage<Invocation> request, boolean async) throws Throwable {
-            try {
-                return async ? asyncInvoke(invoker, request) : syncInvoke(invoker, request);
-            } finally {
-                //调用结束，使用新的上下文
-                Map<String, Object> session = request.getContext().getSession();
-                RequestContext.restore(new RequestContext(session == null ? null : new HashMap<>(session)));
-            }
+            return async ? asyncInvoke(invoker, request) : syncInvoke(invoker, request);
         }
 
         /**
@@ -965,43 +1033,62 @@ public abstract class AbstractConsumerConfig<T> extends AbstractInterfaceConfig 
          *
          * @param invoker 调用器
          * @param request 请求
-         * @return
-         * @throws Throwable
+         * @return 返回值
+         * @throws Throwable 异常
          */
         protected Object syncInvoke(final Invoker invoker, final RequestMessage<Invocation> request) throws Throwable {
-            CompletableFuture<Result> future = invoker.invoke(request);
             try {
+                CompletableFuture<Result> future = invoker.invoke(request);
                 //正常同步返回，处理Java8的future.get内部先自循环造成的性能问题
                 Result result = future.get(Integer.MAX_VALUE, TimeUnit.MILLISECONDS);
                 if (result.isException()) {
                     throw result.getException();
                 }
                 return result.getValue();
-            } catch (ExecutionException e) {
+            } catch (CompletionException | ExecutionException e) {
                 throw e.getCause() != null ? e.getCause() : e;
+            } finally {
+                //调用结束，使用新的请求上下文，保留会话级别上下文
+                InnerContext context = new InnerContext(request.getContext());
+                RequestContext.restore(context.create());
             }
         }
 
         /**
          * 异步调用
+         *
+         * @param invoker 调用器
+         * @param request 请求
+         * @return 返回值
          */
-        protected Object asyncInvoke(final Invoker invoker, final RequestMessage<Invocation> request) throws Throwable {
+        protected Object asyncInvoke(final Invoker invoker, final RequestMessage<Invocation> request) {
             //异步调用，业务逻辑执行完毕，不清理IO线程的上下文
             CompletableFuture<Object> response = new CompletableFuture<>();
-            CompletableFuture<Result> future = invoker.invoke(request);
-            future.whenComplete((res, err) -> {
-                //需要在这里判断是否要进行恢复
-                if (request.getThread() != Thread.currentThread()) {
-                    //确保在whenComplete执行的用户业务代码能拿到调用上下文
-                    RequestContext.restore(request.getContext());
-                }
-                Throwable throwable = err == null ? res.getException() : err;
-                if (throwable != null) {
-                    response.completeExceptionally(throwable);
-                } else {
-                    response.complete(res.getValue());
-                }
-            });
+            try {
+                CompletableFuture<Result> future = invoker.invoke(request);
+                future.whenComplete((res, err) -> {
+                    //判断线程是否发生切换，从而决定是否要恢复上下文，确保用户业务代码能拿到调用上下文
+//                    if (request.getThread() != Thread.currentThread()) {
+//                        transmits.forEach(o -> o.restoreOnComplete(request));
+//                    }
+                    Throwable throwable = err == null ? res.getException() : err;
+                    if (throwable != null) {
+                        response.completeExceptionally(throwable);
+                    } else {
+                        response.complete(res.getValue());
+                    }
+                });
+            } catch (CompletionException e) {
+                //调用出错，线程没有切换，保留原有上下文
+                response.completeExceptionally(e.getCause() != null ? e.getCause() : e);
+            } catch (Throwable e) {
+                //调用出错，线程没有切换，保留原有上下文
+                response.completeExceptionally(e);
+            } finally {
+                //调用结束，使用新的请求上下文，保留会话级别上下文
+                InnerContext context = new InnerContext(request.getContext());
+                RequestContext.restore(context.create());
+            }
             return response;
         }
 

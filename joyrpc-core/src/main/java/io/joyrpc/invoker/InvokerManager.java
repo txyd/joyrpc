@@ -35,7 +35,9 @@ import io.joyrpc.config.ProviderConfig;
 import io.joyrpc.constants.Constants;
 import io.joyrpc.context.GlobalContext;
 import io.joyrpc.event.Publisher;
+import io.joyrpc.event.PublisherConfig;
 import io.joyrpc.exception.IllegalConfigureException;
+import io.joyrpc.extension.MapParametric;
 import io.joyrpc.extension.Parametric;
 import io.joyrpc.extension.URL;
 import io.joyrpc.metric.DashboardAware;
@@ -44,7 +46,6 @@ import io.joyrpc.protocol.ServerProtocol;
 import io.joyrpc.protocol.handler.DefaultProtocolAdapter;
 import io.joyrpc.thread.NamedThreadFactory;
 import io.joyrpc.thread.ThreadPool;
-import io.joyrpc.transport.Client;
 import io.joyrpc.transport.Server;
 import io.joyrpc.transport.ShareServer;
 import io.joyrpc.transport.channel.Channel;
@@ -87,12 +88,18 @@ public class InvokerManager {
      * 名称函数
      */
     public static final BiFunction<String, String, String> NAME = (className, alias) -> className + "/" + alias;
+    protected static final String EVENT_PUBLISHER_GROUP = "event.invoker";
+    protected static final String EVENT_PUBLISHER_NAME = "default";
+    protected static final PublisherConfig EVENT_PUBLISHER_CONF = PublisherConfig.builder().timeout(1000).build();
 
     /**
      * 全局的生成器
      */
     public static final InvokerManager INSTANCE = new InvokerManager();
-
+    /**
+     * 事件通知器
+     */
+    protected Publisher<ExporterEvent> publisher;
     /**
      * 业务服务引用
      */
@@ -123,6 +130,8 @@ public class InvokerManager {
 
     protected InvokerManager() {
         Shutdown.addHook(new Shutdown.HookAdapter((Shutdown.Hook) this::close, 0));
+        this.publisher = EVENT_BUS.get().getPublisher(EVENT_PUBLISHER_GROUP, EVENT_PUBLISHER_NAME, EVENT_PUBLISHER_CONF);
+        this.publisher.start();
     }
 
     /**
@@ -457,33 +466,12 @@ public class InvokerManager {
             final Publisher<NodeEvent> publisher = EVENT_BUS.get().getPublisher(EVENT_PUBLISHER_CLUSTER, clusterName, EVENT_PUBLISHER_CLUSTER_CONF);
             final Cluster cluster = new Cluster(clusterName, url, registry, null, null, null, dashboardFactory, METRIC_HANDLER.extensions(), publisher);
             //判断是否有回调，如果注册成功，说明有回调方法，需要往Cluster注册事件，监听节点断开事件
-            CallbackContainer container = null;
-            boolean callback = callbackManager.register(config.getProxyClass());
-            if (callback) {
-                container = callbackManager.getConsumer();
-                cluster.addHandler(event -> {
-                    switch (event.getType()) {
-                        case DISCONNECT:
-                            Object payload = event.getPayload();
-                            //删除Transport上的回调
-                            Client client = payload != null && payload instanceof Client ? (Client) payload : event.getNode().getClient();
-                            //删除Callback
-                            List<CallbackInvoker> callbacks = callbackManager.getConsumer().removeCallback(client);
-                            if (!Shutdown.isShutdown() && cluster.isOpened()) {
-                                //没有关机和集群没有销毁则重新callback
-                                callbacks.forEach(invoker -> invoker.getCallback().recallback());
-                            }
-
-                    }
-                });
-            }
-            serializationRegister(config.getProxyClass(), callbackManager);
+            serializationRegister(config.getProxyClass());
             //refer的名称和key保持一致，便于删除
-            return new Refer(clusterName, url, config, registry, registerUrl, configure, subscribeUrl, configHandler, cluster, loadBalance, container,
-                    (v, t) -> {
-                        //关闭回调，移除集群和引用
-                        refers.remove(v.getName());
-                    });
+            return new Refer(clusterName, url, config, registry, registerUrl, configure, subscribeUrl, configHandler,
+                    cluster, loadBalance, callbackManager.getConsumer(), this.publisher,
+                    InvokerManager::getFirstExporter,
+                    (v, t) -> refers.remove(v.getName()));
         });
     }
 
@@ -500,9 +488,9 @@ public class InvokerManager {
     /**
      * 构建路由器
      *
-     * @param config
-     * @param url
-     * @return
+     * @param config 配置
+     * @param url    url
+     * @return 负载均衡
      */
     protected <T> LoadBalance buildLoadbalance(final ConsumerConfig<T> config, final URL url) {
         //负载均衡
@@ -523,10 +511,9 @@ public class InvokerManager {
     /**
      * 注册序列化
      *
-     * @param clazz
-     * @param callbackManager
+     * @param clazz 类
      */
-    protected void serializationRegister(final Class clazz, final CallbackManager callbackManager) {
+    protected void serializationRegister(final Class<?> clazz) {
 
         List<Registration> registrations = new LinkedList<>();
         Iterable<Serialization> itr = SERIALIZATION.extensions();
@@ -579,9 +566,9 @@ public class InvokerManager {
         }
         return exports.computeIfAbsent(name, o -> new ConcurrentHashMap<>()).computeIfAbsent(url.getPort(),
                 o -> {
-                    callbackManager.register(config.getProxyClass());
-                    serializationRegister(config.getProxyClass(), callbackManager);
-                    return new Exporter(name, url, config, registries, registerUrls, configure, subscribeUrl, configHandler, getServer(url),
+                    serializationRegister(config.getProxyClass());
+                    return new Exporter(name, url, config, registries, registerUrls, configure, subscribeUrl,
+                            configHandler, getServer(url), callbackManager.getProducer(), publisher,
                             c -> {
                                 Map<Integer, Exporter> map = exports.get(c.getName());
                                 if (map != null) {
@@ -641,7 +628,8 @@ public class InvokerManager {
      * @return
      */
     public CompletableFuture<Void> close() {
-        return close(GlobalContext.asParametric().getBoolean(Constants.GRACEFULLY_SHUTDOWN_OPTION));
+        Parametric parametric = new MapParametric(GlobalContext.getContext());
+        return close(parametric.getBoolean(Constants.GRACEFULLY_SHUTDOWN_OPTION));
     }
 
     /**
@@ -651,10 +639,12 @@ public class InvokerManager {
      * @return
      */
     public CompletableFuture<Void> close(final boolean gracefully) {
+        publisher.close();
         CompletableFuture<Void> result = new CompletableFuture<>();
         //保存所有的注册中心
         Set<Registry> registries = new HashSet<>(5);
-        long timeout = GlobalContext.asParametric().getPositiveLong(OFFLINE_TIMEOUT_OPTION);
+        Parametric parametric = new MapParametric(GlobalContext.getContext());
+        long timeout = parametric.getPositiveLong(OFFLINE_TIMEOUT_OPTION);
         //广播下线消息
         offline(timeout, gracefully).whenComplete((k, s) ->
                 //关闭服务

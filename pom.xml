@@ -6,16 +6,17 @@
     <groupId>io.joyrpc</groupId>
     <artifactId>joyrpc</artifactId>
     <packaging>pom</packaging>
-    <version>1.0.5-SNAPSHOT</version>
+    <version>1.0.6-SNAPSHOT</version>
     <modules>
-        <module>joyrpc-spring</module>
-        <module>joyrpc-test</module>
+        <module>joyrpc-extension</module>
+        <module>joyrpc-api</module>
         <module>joyrpc-core</module>
         <module>joyrpc-plugin</module>
-        <module>joyrpc-all</module>
-        <module>joyrpc-extension</module>
+        <module>joyrpc-spring</module>
         <module>joyrpc-springboot</module>
+        <module>joyrpc-test</module>
         <module>joyrpc-example</module>
+        <module>joyrpc-all</module>
     </modules>
     <name>joyrpc</name>
     <properties>
@@ -43,21 +44,23 @@
         <slf4j.version>1.7.25</slf4j.version>
         <log4j.version>1.2.17</log4j.version>
         <validation-api.version>2.0.1.Final</validation-api.version>
-        <hibernate-validator.version>6.0.13.Final</hibernate-validator.version>
+        <hibernate-validator.version>6.0.18.Final</hibernate-validator.version>
         <javax.el.version>3.0.1-b11</javax.el.version>
         <jmh.version>1.20</jmh.version>
         <guava.version>28.0-jre</guava.version>
         <jackson.version>2.9.9</jackson.version>
-        <javassist.version>3.24.1-GA</javassist.version>
+        <javassist.version>3.27.0-GA</javassist.version>
         <commons-compress.version>1.19</commons-compress.version>
-        <byte-buddy.version>1.10.5</byte-buddy.version>
+        <byte-buddy.version>1.10.9</byte-buddy.version>
         <grpc.version>1.20.0</grpc.version>
-        <netty.version>4.1.43.Final</netty.version>
-        <hazelcast.version>3.12.4</hazelcast.version>
+        <netty.version>4.1.48.Final</netty.version>
+        <hazelcast.version>3.12.5</hazelcast.version>
         <curator.version>4.2.0</curator.version>
         <zookeeper.version>3.5.5</zookeeper.version>
+        <vertx-consul-client>3.9.0</vertx-consul-client>
         <protobuf.version>3.7.1</protobuf.version>
         <resteasy.version>3.0.8.Final</resteasy.version>
+        <commons-jexl3.version>3.1</commons-jexl3.version>
 
         <license.inceptionYear>2019</license.inceptionYear>
         <license.organizationName>joyrpc.io</license.organizationName>
@@ -152,6 +155,11 @@
                 <groupId>org.glassfish</groupId>
                 <artifactId>javax.el</artifactId>
                 <version>${javax.el.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-jexl3</artifactId>
+                <version>${commons-jexl3.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.objenesis</groupId>
@@ -313,6 +321,11 @@
                     <argLine>${maven-surefire-plugin.argLine}</argLine>
                     <skipTests>${maven-surefire-plugin.skipTests}</skipTests>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <version>${maven-deploy-plugin.version}</version>
             </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>

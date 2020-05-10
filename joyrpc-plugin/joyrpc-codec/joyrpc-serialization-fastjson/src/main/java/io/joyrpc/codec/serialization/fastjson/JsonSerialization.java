@@ -9,9 +9,9 @@ package io.joyrpc.codec.serialization.fastjson;
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -35,13 +35,13 @@ import io.joyrpc.extension.condition.ConditionalOnClass;
 import io.joyrpc.permission.BlackList;
 import io.joyrpc.protocol.message.Invocation;
 
-import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Reader;
 import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
 import java.time.*;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.function.BiFunction;
@@ -50,11 +50,11 @@ import java.util.function.Function;
 import static com.alibaba.fastjson.JSON.DEFAULT_GENERATE_FEATURE;
 
 /**
- * JSON序列化
+ * JSON序列化，不推荐在调用请求序列化场景使用
  */
 @Extension(value = "json", provider = "fastjson", order = Serialization.ORDER_FASTJSON)
 @ConditionalOnClass("com.alibaba.fastjson.JSON")
-public class JsonSerialization implements Serialization, Json {
+public class JsonSerialization implements Serialization, Json, BlackList.BlackListAware {
 
     @Override
     public byte getTypeId() {
@@ -64,6 +64,12 @@ public class JsonSerialization implements Serialization, Json {
     @Override
     public String getContentType() {
         return "text/json";
+    }
+
+    @Override
+    public boolean autoType() {
+        //在序列化Invocation的调用参数时候不支持类型，需要类名
+        return false;
     }
 
     @Override
@@ -114,6 +120,11 @@ public class JsonSerialization implements Serialization, Json {
     @Override
     public void parseObject(final Reader reader, final BiFunction<String, Function<Type, Object>, Boolean> function) throws SerializerException {
         JsonSerializer.INSTANCE.parseObject(reader, function);
+    }
+
+    @Override
+    public void updateBlack(final Collection<String> blackList) {
+        JsonSerializer.BLACK_LIST.updateBlack(blackList);
     }
 
     /**
@@ -230,7 +241,7 @@ public class JsonSerialization implements Serialization, Json {
                 for (String feature : features) {
                     try {
                         set.add(SerializerFeature.valueOf(feature));
-                    } catch (IllegalArgumentException e) {
+                    } catch (IllegalArgumentException ignored) {
                     }
                 }
 
@@ -246,7 +257,7 @@ public class JsonSerialization implements Serialization, Json {
         public <T> void serialize(final OutputStream os, final T object) throws SerializerException {
             try {
                 JSON.writeJSONString(os, StandardCharsets.UTF_8, object, serializeConfig, null, null, DEFAULT_GENERATE_FEATURE, serializerFeatures);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 throw new SerializerException("Error occurred while serializing class " + object.getClass().getName(), e);
             }
         }
@@ -302,7 +313,7 @@ public class JsonSerialization implements Serialization, Json {
             }
             try {
                 return JSON.parseObject(is, StandardCharsets.UTF_8, type, parserConfig, parserFeatures);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 throw new SerializerException("Error occurs while parsing object", e);
             }
         }
@@ -314,7 +325,7 @@ public class JsonSerialization implements Serialization, Json {
             }
             try {
                 return JSON.parseObject(is, StandardCharsets.UTF_8, reference == null ? null : reference.getType(), parserConfig, parserFeatures);
-            } catch (IOException e) {
+            } catch (Exception e) {
                 throw new SerializerException("Error occurs while parsing object", e);
             }
         }

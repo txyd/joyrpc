@@ -27,9 +27,13 @@ import javax.validation.constraints.NotNull;
  */
 public interface DemoService {
 
-    String sayHello(@NotNull String str);
+    String sayHello(@NotNull String str) throws Throwable;
 
-    default String echo(String str) {
+    int test(int count);
+
+    <T> T generic(T value);
+
+    default String echo(String str) throws Throwable {
         return sayHello(str);
     }
 

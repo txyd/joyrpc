@@ -39,53 +39,36 @@ import static io.joyrpc.util.ClassUtils.isJavaClass;
 public abstract class AbstractGrpcFactory implements GrpcFactory {
 
     public static final String REQUEST_SUFFIX = "Request";
-    public static final String RESPONSE_SUFFIX = "ResponsePayload";
+    public static final String RESPONSE_SUFFIX = "Response";
 
     @Override
     public GrpcType generate(final Class<?> clz, final Method method) throws ProxyException {
         try {
-            ClassWrapper request = getRequestWrapper(clz, method, () -> getRequestClassName(clz, method));
-            ClassWrapper response = getResponseWrapper(clz, method, () -> getResponseClassName(clz, method));
+            ClassWrapper request = getRequestWrapper(clz, method, () -> getSuffix(method, REQUEST_SUFFIX));
+            ClassWrapper response = getResponseWrapper(clz, method, () -> getSuffix(method, RESPONSE_SUFFIX));
             return new GrpcType(request, response);
         } catch (ProxyException e) {
             throw e;
-        } catch (Exception e) {
+        } catch (Throwable e) {
             throw new ProxyException(String.format("Error occurs while building grpcType of %s.%s",
                     clz.getName(), method.getName()), e);
         }
     }
 
     /**
-     * 构建请求对象类名
+     * 获取后缀名称
      *
-     * @param clz    类
      * @param method 方法
-     * @return 请求对象类名
+     * @param suffix 后缀
+     * @return 名称
      */
-    protected String getRequestClassName(final Class<?> clz, final Method method) {
+    protected String getSuffix(final Method method, final String suffix) {
         String methodName = method.getName();
         return new StringBuilder(100)
-                .append(clz.getName()).append('$')
                 .append(Character.toUpperCase(methodName.charAt(0)))
                 .append(methodName.substring(1))
-                .append(REQUEST_SUFFIX)
+                .append(suffix)
                 .toString();
-    }
-
-    /**
-     * 构建应答对象类名
-     *
-     * @param clz    类
-     * @param method 方法
-     * @return 应答对象类名
-     */
-    protected String getResponseClassName(final Class<?> clz, final Method method) {
-        String methodName = method.getName();
-        return new StringBuilder(100)
-                .append(clz.getName()).append('$')
-                .append(Character.toUpperCase(methodName.charAt(0)))
-                .append(methodName.substring(1))
-                .append(RESPONSE_SUFFIX).toString();
     }
 
     /**
@@ -134,11 +117,11 @@ public abstract class AbstractGrpcFactory implements GrpcFactory {
      *
      * @param clz    类
      * @param method 方法
-     * @param naming 方法名称提供者
+     * @param suffix 方法名后缀提供者
      * @return 包装的类
      * @throws Exception 异常
      */
-    protected ClassWrapper getRequestWrapper(final Class<?> clz, final Method method, final Supplier<String> naming) throws Exception {
+    protected ClassWrapper getRequestWrapper(final Class<?> clz, final Method method, final Supplier<String> suffix) throws Exception {
         Parameter[] parameters = method.getParameters();
         switch (parameters.length) {
             case 0:
@@ -149,7 +132,7 @@ public abstract class AbstractGrpcFactory implements GrpcFactory {
                     return new ClassWrapper(clazz, false);
                 }
             default:
-                return new ClassWrapper(buildRequestClass(clz, method, naming), true);
+                return new ClassWrapper(buildRequestClass(clz, method, suffix), true);
         }
     }
 
@@ -157,11 +140,11 @@ public abstract class AbstractGrpcFactory implements GrpcFactory {
      * 构建请求类型
      *
      * @param method 方法
-     * @param naming 方法名称提供者
+     * @param suffix 方法名后缀提供者
      * @return
      * @throws Exception
      */
-    protected abstract Class<?> buildRequestClass(final Class<?> clz, final Method method, final Supplier<String> naming) throws Exception;
+    protected abstract Class<?> buildRequestClass(final Class<?> clz, final Method method, final Supplier<String> suffix) throws Exception;
 
     /**
      * 是否是POJO类

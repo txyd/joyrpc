@@ -33,7 +33,10 @@ import io.joyrpc.event.AsyncResult;
 import io.joyrpc.event.EventHandler;
 import io.joyrpc.event.Publisher;
 import io.joyrpc.event.PublisherConfig;
-import io.joyrpc.exception.*;
+import io.joyrpc.exception.AuthenticationException;
+import io.joyrpc.exception.InitializationException;
+import io.joyrpc.exception.ProtocolException;
+import io.joyrpc.exception.TransportException;
 import io.joyrpc.extension.URL;
 import io.joyrpc.extension.URLOption;
 import io.joyrpc.metric.Dashboard;
@@ -43,11 +46,10 @@ import io.joyrpc.transport.EndpointFactory;
 import io.joyrpc.transport.message.Message;
 import io.joyrpc.util.Timer;
 import io.joyrpc.util.*;
+import io.joyrpc.util.network.Ping;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.ConnectException;
-import java.net.NoRouteToHostException;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -57,10 +59,10 @@ import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static io.joyrpc.Plugin.*;
 import static io.joyrpc.constants.Constants.CANDIDATURE_OPTION;
-import static io.joyrpc.event.UpdateEvent.UpdateType.FULL;
 import static io.joyrpc.util.Status.CLOSED;
 import static io.joyrpc.util.StringUtils.toSimpleString;
 import static io.joyrpc.util.Timer.timer;
@@ -79,7 +81,6 @@ public class Cluster {
     public static final PublisherConfig EVENT_PUBLISHER_METRIC_CONF = PublisherConfig.builder().timeout(1000).build();
     public static final String EVENT_PUBLISHER_CLUSTER = "event.cluster";
     public static final PublisherConfig EVENT_PUBLISHER_CLUSTER_CONF = PublisherConfig.builder().timeout(1000).build();
-    public static final List<String> DEAD_MSG = Resource.lines("network.error");
     /**
      * 名称
      */
@@ -101,13 +102,13 @@ public class Cluster {
      */
     protected EndpointFactory factory;
     /**
-     * 授权认证提供者
+     * 身份认证提供者
      */
-    protected Function<URL, Message> authorization;
+    protected Function<URL, Message> authentication;
     /**
      * 仪表盘提供者
      */
-    protected DashboardFactory<? extends Dashboard> dashboardFactory;
+    protected DashboardFactory dashboardFactory;
     /**
      * 集群指标通知器
      */
@@ -125,7 +126,7 @@ public class Cluster {
      */
     protected int minSize;
     /**
-     * 初始化建连的数量
+     * 达到初始化建连的数量则自动起来
      */
     protected int initSize;
     /**
@@ -137,7 +138,7 @@ public class Cluster {
      */
     protected long initConnectTimeout;
     /**
-     * 是否验证初始化建连（即初始化连接超时则启动失败）
+     * 当初始化超时的时候，是否验证必须要有连接
      */
     protected boolean check;
     /**
@@ -186,8 +187,8 @@ public class Cluster {
     }
 
     public Cluster(final String name, final URL url, final Registar registar, final Candidature candidature,
-                   final EndpointFactory factory, final Function<URL, Message> authorization,
-                   final DashboardFactory<Dashboard> dashboardFactory,
+                   final EndpointFactory factory, final Function<URL, Message> authentication,
+                   final DashboardFactory dashboardFactory,
                    final Iterable<? extends MetricHandler> metricHandlers,
                    final Publisher<NodeEvent> clusterPublisher) {
         Objects.requireNonNull(url, "url can not be null.");
@@ -198,7 +199,7 @@ public class Cluster {
         Objects.requireNonNull(this.registar, "registar can not be null.");
         this.candidature = candidature != null ? candidature : CANDIDATURE.get(url.getString(CANDIDATURE_OPTION), CANDIDATURE_OPTION.getValue());
         this.factory = factory != null ? factory : ENDPOINT_FACTORY.getOrDefault(url.getString("endpointFactory"));
-        this.authorization = authorization;
+        this.authentication = authentication;
         this.initSize = url.getInteger(Constants.INIT_SIZE_OPTION);
         this.minSize = url.getInteger(Constants.MIN_SIZE_OPTION);
         this.initTimeout = url.getLong(Constants.INIT_TIMEOUT_OPTION);
@@ -388,47 +389,12 @@ public class Cluster {
         } else if (throwable instanceof AuthenticationException) {
             //认证失败，最少20秒重连
             return SystemClock.now() + Math.max(reconnectInterval, 20000L) + ThreadLocalRandom.current().nextInt(1000);
-        } else if (detectDead(throwable)) {
+        } else if (Ping.detectDead(throwable)) {
             //目标节点不存在了，最少20秒重连
             return SystemClock.now() + Math.max(reconnectInterval, 20000L) + ThreadLocalRandom.current().nextInt(1000);
         } else {
             return SystemClock.now() + reconnectInterval + ThreadLocalRandom.current().nextInt(1000);
         }
-    }
-
-    /**
-     * 检查目标节点是否已经不存活了
-     *
-     * @param throwable 异常
-     * @return 是否是死亡节点
-     */
-    protected boolean detectDead(Throwable throwable) {
-        if (throwable == null) {
-            return false;
-        }
-        Queue<Throwable> queue = new LinkedList<>();
-        queue.add(throwable);
-        Throwable t;
-        while (!queue.isEmpty()) {
-            t = queue.poll();
-            t = t instanceof ConnectionException ? t.getCause() : t;
-            if (t instanceof NoRouteToHostException) {
-                //没有路由
-                return true;
-            } else if (t instanceof ConnectException) {
-                //连接异常
-                String msg = t.getMessage().toLowerCase();
-                for (String deadMsg : DEAD_MSG) {
-                    if (msg.contains(deadMsg)) {
-                        return true;
-                    }
-                }
-                return false;
-            } else if (t.getCause() != null) {
-                queue.add(t.getCause());
-            }
-        }
-        return false;
     }
 
     /**
@@ -441,7 +407,7 @@ public class Cluster {
     protected Node createNode(final Shard shard, final NodeHandler handler) {
         return new Node(name, url, shard,
                 factory,
-                authorization,
+                authentication,
                 handler,
                 dashboardFactory == null ? null : dashboardFactory.create(url, DashboardType.Node),
                 metricPublisher);
@@ -513,6 +479,15 @@ public class Cluster {
         return registar;
     }
 
+    /**
+     * 设置当初始化超时的时候，是否验证必须要有连接。<br/>
+     * 在应用同时提供服务并消费自身的服务时候，在应用优雅启动阶段需要设置为False。
+     *
+     * @param check 验证标识
+     */
+    public void setCheck(boolean check) {
+        this.check = check;
+    }
 
     /**
      * 控制器<br/>
@@ -576,10 +551,6 @@ public class Cluster {
          * 补充节点的名称
          */
         protected final String supplyTask;
-        /**
-         * check任务
-         */
-        protected CheckTask checkTask;
 
         /**
          * 构造函数
@@ -598,15 +569,11 @@ public class Cluster {
             } else {
                 long beginTime = SystemClock.now();
                 this.trigger = new Trigger(cluster.name, cluster.initSize,
-                        cluster.initTimeout, cluster.initConnectTimeout, cluster.check,
+                        cluster.initTimeout, cluster.initConnectTimeout, () -> cluster.check,
                         () -> ready.accept(new AsyncResult<>(this)),
                         () -> ready.accept(new AsyncResult<>(this,
                                 new InitializationException(
                                         String.format("initialization timeout, used %d ms.", SystemClock.now() - beginTime)))));
-                if (!cluster.check) {
-                    this.checkTask = new CheckTask("Check-" + cluster.name,
-                            SystemClock.now() + cluster.initTimeout, trigger);
-                }
             }
         }
 
@@ -624,7 +591,12 @@ public class Cluster {
                     //遍历任务执行
                     Runnable runnable;
                     while ((runnable = tasks.poll()) != null && isOpened()) {
-                        runnable.run();
+                        //捕获异常，避免运行时
+                        try {
+                            runnable.run();
+                        } catch (Throwable e) {
+                            logger.error("Error occurs while running task . caused by " + e.getMessage(), e);
+                        }
                     }
                     //清空任务标识
                     taskOwner.set(false);
@@ -650,9 +622,7 @@ public class Cluster {
                 logger.info(String.format("%s node %s.", type.getDesc(), node.getName()));
                 offer(() -> node.close(r -> {
                     //连接断开了，则进行关闭
-                    if (r.isSuccess()) {
-                        onNodeDisconnect(node, cluster.getRetryTime(null));
-                    }
+                    onNodeDisconnect(node, cluster.getRetryTime(null));
                 }));
             }
             cluster.clusterPublisher.offer(event);
@@ -672,7 +642,7 @@ public class Cluster {
                 return;
             }
             offer(() -> {
-                int add = 0;
+                int add;
                 switch (event.getType()) {
                     case CLEAR:
                         //清理
@@ -681,21 +651,21 @@ public class Cluster {
                     case UPDATE:
                         //增量更新
                         add = onUpdateEvent(event.getDatum());
+                        if (add > 0) {
+                            //新增了节点，重新选举
+                            candidate();
+                        }
                         break;
                     case FULL:
                         //全量更新
                         add = onFullEvent(event.getDatum());
+                        if (add > 0) {
+                            //新增了节点，重新选举
+                            candidate();
+                        }
+                        //第一次全量事件，触发连接超时检测
+                        Optional.ofNullable(trigger).ifPresent(t -> t.onFull(add));
                         break;
-                }
-                if (add > 0) {
-                    //新增了节点，重新选举
-                    candidate();
-                } else if (!cluster.check && event.getType() == FULL) {
-                    //check为false，事件类型为FULL，直接触发ready
-                    trigger.fireReady();
-                }
-                if (event.getType() == FULL) {
-                    trigger.onClusterEvent();
                 }
             });
         }
@@ -854,10 +824,6 @@ public class Cluster {
             candidate(result.getDiscards(), (s, n) -> discard(n), null);
             //重置可用节点，因为有些节点可能在这次选举中被放弃了
             readys = new ArrayList<>(connects.values());
-            //如果check为false，添加定时任务，当所有节点建完连接之后，无论成功还是失败，直接fire
-            if (checkTask != null && checkTask.initSemaphore(semaphore) && readys.isEmpty()) {
-                timer().add(checkTask);
-            }
         }
 
         /**
@@ -982,6 +948,7 @@ public class Cluster {
          * @param node 节点
          */
         protected void supply(final Node node) {
+            node.getState().initial(node::setState);
             offer(() -> {
                 if (exists(node)) {
                     node.retry.incrementTimes();
@@ -1020,7 +987,7 @@ public class Cluster {
                 } else {
                     logger.error(String.format("Failed connecting node %s. caused by %s.", node.getName(), e.getMessage()), e);
                 }
-                onNodeDisconnect(result.getResult(), cluster.getRetryTime(e));
+                onNodeDisconnect(node, cluster.getRetryTime(e));
             }
         }
 
@@ -1053,20 +1020,20 @@ public class Cluster {
          * @param retryTime 重连时间
          */
         protected void onNodeDisconnect(final Node node, final long retryTime) {
-            //确保在拿到开关执行，这个时候不在选举
-            //两个地方调用，连接不成功，或者连接成功后断开连接
-            //拿到当前节点，如果不存在或者是新的节点则直接丢弃
+            //把它从连接节点里面删除
+            if (connects.remove(node.getName(), node)) {
+                readys = new ArrayList<>(connects.values());
+            }
+            //节点断开，这个时候有可能注册中心事件造成不存在了
             if (exists(node)) {
-                //判断是否连接成功过
-                if (connects.remove(node.getName(), node)) {
-                    readys = new ArrayList<>(connects.values());
-                }
+                //强制设置一下连接断开，避免在open失败没有正常设置好就触发了
+                node.getState().disconnect(node::setState);
                 //如果没有下线，则尝试重连
                 node.getRetry().setRetryTime(retryTime);
                 //把当前节点放回到后备节点
                 backups.offer(new DelayedNode(node));
-                supplies.incrementAndGet();
                 //补充新节点
+                supplies.incrementAndGet();
                 supply(true);
             }
         }
@@ -1132,90 +1099,6 @@ public class Cluster {
             //新增节点初始化状态
             node.getState().initial(node::setState);
             return true;
-        }
-    }
-
-    /**
-     * check 任务
-     */
-    protected static class CheckTask implements Timer.TimeTask {
-
-        /**
-         * 任务名称
-         */
-        protected String name;
-        /**
-         * 清理时间
-         */
-        protected long time;
-        /**
-         * 清理时间间隔
-         */
-        protected int interval = 1000;
-        /**
-         * 任务结束时间
-         */
-        protected long endTime;
-        /**
-         * 信号量
-         */
-        protected AtomicInteger semaphore;
-        /**
-         * trigger
-         */
-        protected Trigger trigger;
-
-        /**
-         * 构造方法
-         *
-         * @param name
-         * @param endTime
-         */
-        public CheckTask(String name, long endTime, Trigger trigger) {
-            this.name = name;
-            this.time = SystemClock.now() + interval;
-            this.endTime = endTime;
-            this.trigger = trigger;
-        }
-
-        @Override
-        public String getName() {
-            return name;
-        }
-
-        @Override
-        public long getTime() {
-            return time;
-        }
-
-        /**
-         * 初始化信号量
-         *
-         * @param semaphore
-         * @return
-         */
-        public boolean initSemaphore(AtomicInteger semaphore) {
-            if (this.semaphore == null) {
-                synchronized (this) {
-                    if (this.semaphore == null) {
-                        this.semaphore = semaphore;
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-
-        @Override
-        public void run() {
-            if (semaphore.get() <= 0) {
-                trigger.fireReady();
-            } else {
-                time = SystemClock.now() + interval;
-                if (time < endTime) {
-                    timer().add(this);
-                }
-            }
         }
     }
 
@@ -1289,13 +1172,13 @@ public class Cluster {
         /**
          * 是否验证初始化建连成功
          */
-        protected boolean check;
+        protected Supplier<Boolean> check;
         /**
-         * 就绪事件
+         * 就绪处理器
          */
         protected Runnable ready;
         /**
-         * 超时事件
+         * 超时处理器
          */
         protected Runnable whenTimeout;
         /**
@@ -1309,7 +1192,7 @@ public class Cluster {
         /**
          * 第一次收到cluster事件
          */
-        protected AtomicBoolean firstOnClusterEvent = new AtomicBoolean(false);
+        protected AtomicBoolean firstConnect = new AtomicBoolean(false);
 
         /**
          * 构造函数
@@ -1321,7 +1204,7 @@ public class Cluster {
          * @param whenTimeout 超时处理器
          */
         public Trigger(final String clusterName, final int initSize, final long timeout, final long connectTimeout,
-                       boolean check, final Runnable ready, final Runnable whenTimeout) {
+                       Supplier<Boolean> check, final Runnable ready, final Runnable whenTimeout) {
             this.clusterName = clusterName;
             this.initSize = initSize;
             this.semaphore = new AtomicLong(initSize);
@@ -1331,9 +1214,9 @@ public class Cluster {
             this.ready = ready;
             this.whenTimeout = whenTimeout;
             if (timeout > 0) {
-                //超时检测，check为false，执行ready
-                timer().add("ReadyTask-" + clusterName, SystemClock.now() + timeout,
-                        () -> fire(check ? whenTimeout : ready));
+                //超时检测
+                timer().add("TimeoutTask-" + clusterName, SystemClock.now() + timeout,
+                        () -> fire(semaphore.get() < initSize || !check.get() ? ready : whenTimeout));
             }
         }
 
@@ -1355,15 +1238,20 @@ public class Cluster {
         }
 
         /**
-         * 第一次接收到集群事件，触发超时检查任务
+         * 接收到集群全量事件，触发连接超时检查任务
+         *
+         * @param size 节点数量
          */
-        public void onClusterEvent() {
-            if (firstOnClusterEvent.compareAndSet(false, true)
-                    && check
-                    && timeout > 0
-                    && connectTimeout > 0) {
-                timer().add("ReadyTask-OnClusterEvent-" + clusterName, SystemClock.now() + connectTimeout,
-                        () -> fire(whenTimeout));
+        public void onFull(int size) {
+            if (firstConnect.compareAndSet(false, true)) {
+                if (size == 0 && !check.get()) {
+                    //没有服务提供者，不需要初始化建立连接
+                    semaphore.set(0L);
+                    fire(ready);
+                } else if (connectTimeout > 0) {
+                    timer().add("ConnectTimeoutTask-" + clusterName, SystemClock.now() + connectTimeout,
+                            () -> fire(semaphore.get() < initSize || !check.get() ? ready : whenTimeout));
+                }
             }
         }
 
@@ -1386,21 +1274,14 @@ public class Cluster {
         }
 
         /**
-         * 触发ready
-         */
-        public void fireReady() {
-            semaphore.set(0L);
-            fire(ready);
-        }
-
-        /**
          * 获取信号量
          *
          * @return 成功标识
          */
         public boolean acquire() {
             if (semaphore.decrementAndGet() == 0) {
-                return fire(ready);
+                fire(ready);
+                return true;
             }
             return false;
         }
@@ -1408,7 +1289,7 @@ public class Cluster {
     }
 
     /**
-     * 面板控制器任务
+     * 面板任务
      */
     protected static class DashboardTask implements Timer.TimeTask {
         /**
@@ -1424,9 +1305,9 @@ public class Cluster {
          */
         protected final long version;
         /**
-         * 上次控制器时间
+         * 时间窗口
          */
-        protected long lastSnapshotTime;
+        protected final long windowTime;
         /**
          * 下次控制器时间
          */
@@ -1448,8 +1329,9 @@ public class Cluster {
             this.dashboard = cluster.dashboard;
             this.version = version;
             //把集群指标过期分布到1秒钟以内，避免同时进行控制器
-            this.lastSnapshotTime = SystemClock.now() + ThreadLocalRandom.current().nextInt(1000);
-            this.time = lastSnapshotTime + dashboard.getMetric().getWindowTime();
+            long lastSnapshotTime = SystemClock.now() + ThreadLocalRandom.current().nextInt(1000);
+            this.windowTime = dashboard.getMetric().getWindowTime();
+            this.time = lastSnapshotTime + windowTime;
             this.dashboard.setLastSnapshotTime(lastSnapshotTime);
             this.name = this.getClass().getSimpleName() + " " + cluster.name;
         }
@@ -1468,7 +1350,7 @@ public class Cluster {
         public void run() {
             if (cluster.versions.get() == version && cluster.isOpened()) {
                 dashboard.snapshot();
-                time = SystemClock.now() + dashboard.getMetric().getWindowTime();
+                time = SystemClock.now() + windowTime;
                 timer().add(this);
             }
         }
